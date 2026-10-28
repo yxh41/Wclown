@@ -3,6 +3,10 @@
 #import "WCRClownPanel.h"
 
 static UIWindow *gEntryWindow = nil;
+// App 主窗口的弱引用：必须在创建自己的 overlay 之前捕获。
+// 否则后续 scene.keyWindow 可能指回我们的小 overlay 窗口，导致面板被 present 进
+// 46x46 的窗口里，屏幕上只剩一个白色小方块。
+static __weak UIWindow *gHostWindow = nil;
 static BOOL gOriginKnown = NO;
 static CGPoint gEntryOrigin = {0, 0};
 
@@ -60,6 +64,9 @@ static CGPoint gEntryOrigin = {0, 0};
     UIWindowScene *scene = [self activeScene];
     if (!scene) return;
 
+    // 先记住 App 主窗口（此刻 keyWindow 一定还是微信的），再创建 overlay
+    if (!gHostWindow) gHostWindow = scene.keyWindow;
+
     CGFloat size = 46.0;
     CGFloat top = scene.statusBarManager.statusBarFrame.size.height + 8.0;
     CGPoint origin = gOriginKnown ? gEntryOrigin : CGPointMake(12.0, top);
@@ -95,10 +102,27 @@ static CGPoint gEntryOrigin = {0, 0};
     gEntryWindow = window;
 }
 
-+ (void)wcr_entryTapped {
-    UIWindowScene *scene = [self activeScene];
-    UIViewController *presenter = scene.keyWindow.rootViewController;
+// 只在 App 主窗口（或任一非 overlay 的可见窗口）里找 presenter，绝不从自己的
+// 小 overlay 窗口 present，否则面板会被压缩进 46x46 的框子里。
++ (nullable UIViewController *)wcr_hostPresenter {
+    UIViewController *presenter = gHostWindow.rootViewController;
+    if (!presenter) {
+        for (UIWindow *w in [self activeScene].windows) {
+            if (w == gEntryWindow) continue;
+            if (!w.hidden && w.rootViewController) { presenter = w.rootViewController; break; }
+        }
+    }
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    return presenter;
+}
+
++ (void)wcr_entryTapped {
+    UIViewController *presenter = [self wcr_hostPresenter];
+    NSLog(@"[WCRClown] entry tapped presenter=%@", presenter ?: @"(nil)");
+    if (presenter.view.window == gEntryWindow) {
+        NSLog(@"[WCRClown] ERROR: presenter resolved to overlay window, abort");
+        return;
+    }
     [WCRClownPanelController presentFrom:presenter];
 }
 
