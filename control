@@ -1,0 +1,9 @@
+Package: com.zlhkf.wclown
+Name: WCRClownStandalone
+Version: 0.0.2-diag
+Architecture: iphoneos-arm64e
+Description: 独立 clean-room 重实现 WCRefine 小丑功能；本地显示覆盖，不修改支付/服务器。开发版：诊断 Hook + 核心接通（roothide / iOS 16.4.1）。
+Maintainer: zlhkf
+Author: zlhkf
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), preferenceloader (>= 2.2.0)
