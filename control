@@ -1,6 +1,4 @@
 Package: com.zlhkf.wclown
-# Name 是安装器里展示的名字（沿用用户取的包名 Wclown）；
-# WCRClownStandalone 只是内部编译目标/dylib 名，对用户不可见。
 Name: Wclown
 Version: 0.0.2-diag
 Architecture: iphoneos-arm64e
