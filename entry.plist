@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>entry</key>
+	<dict>
+		<key>cell</key>
+		<string>PSLinkCell</string>
+		<key>label</key>
+		<string>小丑功能</string>
+		<key>bundle</key>
+		<string>WCRClownSettings</string>
+		<key>detail</key>
+		<string>WCRClownSettingsController</string>
+		<key>isController</key>
+		<true/>
+		<key>footerText</key>
+		<string>WCRefine 小丑功能独立重实现（roothide / iOS 16.4.1）</string>
+	</dict>
+</dict>
+</plist>
