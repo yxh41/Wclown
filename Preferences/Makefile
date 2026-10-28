@@ -14,4 +14,4 @@ include $(THEOS_MAKE_PATH)/bundle.mk
 # 文字、PSToggleSwitchCell 不渲染开关。这里在 staging 阶段强制拷入。
 internal-stage::
 	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)/Library/PreferenceBundles/WCRClownSettings.bundle$(ECHO_END)
-	$(ECHO_NOTHING)cp $(THEOS_PROJECT_DIR)/Info.plist $(THEOS_STAGING_DIR)/Library/PreferenceBundles/WCRClownSettings.bundle/Info.plist$(ECHO_END)
+	$(ECHO_NOTHING)cp $(THEOS_PROJECT_DIR)/Preferences/Info.plist $(THEOS_STAGING_DIR)/Library/PreferenceBundles/WCRClownSettings.bundle/Info.plist$(ECHO_END)
