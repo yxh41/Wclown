@@ -5,6 +5,7 @@
 #import "WCRClownRuntime.h"
 #import "WCRClownEntryInstaller.h"
 #import "WCRClownPanel.h"
+#import "WCRClownEntry.h"
 
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
@@ -112,16 +113,19 @@ static void WCRLogCompatibility(void) {
 - (id)filteredMenuItems:(id)arg {
     id items = %orig;
     @try {
-        // 始终注入「小丑」：开关全部在此面板内调整。若按 enabled/子开关条件显示，
-        // 默认全关时会永远摸不到入口（鸡生蛋死锁），这是之前"动不了"的根因之一。
-        WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
+        // 仅在用户显式开启时才注入「小丑」。默认关闭：微信的 filteredMenuItems: 返回的很可能是
+        // 微信自有菜单项类而非 UIMenuItem，盲目混入会让微信枚举时调用自身方法 ->
+        // unrecognized selector -> 长按闪退。保持关闭，改用零风险的悬浮入口开面板。
+        if ([WCRClownConfig shared].menuEntryEnabled) {
+            WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
+            UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
 #pragma clang diagnostic pop
-        if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
-        else if (items) items = @[items, item];
-        else items = @[item];
+            if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
+            else if (items) items = @[items, item];
+            else items = @[item];
+        }
     } @catch (NSException *e) {
         WCRLog("menu exception: %@", e);
     }
@@ -140,6 +144,8 @@ static void WCRLogCompatibility(void) {
         [WCRClownEntryInstaller installIfSupported];
         WCRLog("loaded build %s", kWCRClownBuildTag);
         if ([WCRClownConfig shared].diagnosticHooksEnabled) WCRLogCompatibility();
+        // 悬浮入口：纯 UIKit overlay，不依赖微信任何私有类，也不会往微信数据结构注入对象
+        [WCRClownEntry installIfNeeded];
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"filteredMenuItems:")) %init(WCRMenu);
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
