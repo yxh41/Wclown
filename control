@@ -1,5 +1,7 @@
 Package: com.zlhkf.wclown
-Name: WCRClownStandalone
+# Name 是安装器里展示的名字（沿用用户取的包名 Wclown）；
+# WCRClownStandalone 只是内部编译目标/dylib 名，对用户不可见。
+Name: Wclown
 Version: 0.0.2-diag
 Architecture: iphoneos-arm64e
 Description: 独立 clean-room 重实现 WCRefine 小丑功能；本地显示覆盖，不修改支付/服务器。开发版：诊断 Hook + 核心接通（roothide / iOS 16.4.1）。
