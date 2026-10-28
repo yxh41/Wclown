@@ -121,8 +121,11 @@ static void WCRLogCompatibility(void) {
         WCRClownConfig *cfg = [WCRClownConfig shared];
         if (cfg.enabled && (cfg.textEnabled || cfg.imageEnabled || cfg.messageTimeEnabled ||
                             cfg.yinYangEnabled || cfg.transferAmountEnabled)) {
-            WCRInstallClownMenuSelectorIfNeeded([self class]);
+            WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
+#pragma clang diagnostic pop
             if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
             else if (items) items = @[items, item];
             else items = @[item];
