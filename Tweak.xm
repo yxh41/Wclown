@@ -95,7 +95,7 @@ static void WCRLogCompatibility(void) {
     }
 }
 
-#pragma mark - 应用覆盖到消息渲染（在 %orig 前改数据，让 Cell 渲染读到覆盖）
+#pragma mark - 应用覆盖到消息渲染（在 hook 前改数据，让 Cell 渲染读到覆盖）
 %group WCRApply
 %hook BaseMessageCellView
 - (void)setViewModel:(id)vm {
