@@ -4,8 +4,10 @@
 #import "WCRClownStore.h"
 #import "WCRClownRuntime.h"
 #import "WCRClownEntryInstaller.h"
+#import "WCRClownPanel.h"
 
-static const char kWCRClownBuildTag[] = "wcrclown-0.0.2-diag";
+// 非 static：面板要 extern 引用它显示实际构建版本（build.yml 的 sed 仍匹配 kWCRClownBuildTag[] = "）
+const char kWCRClownBuildTag[] = "wcrclown-0.0.2-diag";
 #define WCRLog(fmt, ...) NSLog(@"[WCRClown] " fmt, ##__VA_ARGS__)
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
@@ -36,25 +38,15 @@ static UIViewController *WCRTopController(void) {
     return rc;
 }
 
-// 菜单点击 IMP（通过 class_addMethod 注入到 Cell 类）
+// 菜单点击 IMP（通过 class_addMethod 注入到 Cell 类）：打开微信内设置面板
 static void WCRClownMenuHandler(id self, SEL _cmd, id sender) {
     @try {
         id wrap = WCRCellWrap(self, nil);
-        if (!wrap) return;
-        WCRClownConfig *cfg = [WCRClownConfig shared];
-        NSString *key = [WCRClownStore.shared messageKeyForWrap:wrap session:nil];
-        NSDictionary *ov = key.length ? [WCRClownStore.shared overridesForKey:key] : nil;
-        NSString *msg = [NSString stringWithFormat:
-            @"小丑菜单(诊断)\nkey=%@\n总=%d 文字=%d 图片=%d 时间=%d 阴阳=%d 聊天时间=%d 转账=%d 排序=%d\n覆盖=%@",
-            key ?: @"(nil)", cfg.enabled, cfg.textEnabled, cfg.imageEnabled, cfg.messageTimeEnabled,
-            cfg.yinYangEnabled, cfg.chatTimeEnabled, cfg.transferAmountEnabled, cfg.messageSortEnabled,
-            ov ?: @"(无)"];
-        WCRLog("menu tapped key=%@ overrides=%@", key, ov);
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"小丑(诊断)"
-                                                                       message:msg
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
-        [WCRTopController() presentViewController:alert animated:YES completion:nil];
+        NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+        WCRLog("menu tapped key=%@", key);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [WCRClownPanelController presentFrom:WCRTopController()];
+        });
     } @catch (NSException *e) {
         WCRLog("menu handler exception: %@", e);
     }
@@ -118,18 +110,16 @@ static void WCRLogCompatibility(void) {
 - (id)filteredMenuItems:(id)arg {
     id items = %orig;
     @try {
-        WCRClownConfig *cfg = [WCRClownConfig shared];
-        if (cfg.enabled && (cfg.textEnabled || cfg.imageEnabled || cfg.messageTimeEnabled ||
-                            cfg.yinYangEnabled || cfg.transferAmountEnabled)) {
-            WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
+        // 始终注入「小丑」：开关全部在此面板内调整。若按 enabled/子开关条件显示，
+        // 默认全关时会永远摸不到入口（鸡生蛋死锁），这是之前"动不了"的根因之一。
+        WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
+        UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
 #pragma clang diagnostic pop
-            if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
-            else if (items) items = @[items, item];
-            else items = @[item];
-        }
+        if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
+        else if (items) items = @[items, item];
+        else items = @[item];
     } @catch (NSException *e) {
         WCRLog("menu exception: %@", e);
     }
