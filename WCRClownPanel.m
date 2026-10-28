@@ -2,9 +2,6 @@
 #import "WCRClownConfig.h"
 #import <objc/runtime.h>
 
-// Tweak.xm 中的构建标记，用于在面板上显示当前实际版本（避免装错旧包）
-extern const char kWCRClownBuildTag[];
-
 static NSString *const kWCRClownToggleCellID = @"WCRClownToggleCell";
 static char kWCRClownSwitchKeyChar;
 
