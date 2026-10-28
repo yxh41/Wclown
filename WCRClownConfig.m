@@ -26,7 +26,9 @@ static NSString *const kWCRClownDefaults = @"com.zlhkf.wclown";
             @"yinYangEnabled": @NO,
             @"transferAmountEnabled": @NO,
             @"transferPersistOnExitChat": @NO,
-            @"diagnosticHooksEnabled": @NO
+            @"diagnosticHooksEnabled": @NO,
+            @"menuEntryEnabled": @NO,          // 长按菜单注入默认关（历史闪退）
+            @"floatingEntryEnabled": @YES      // 悬浮入口默认开（零风险）
         }];
     }
     return self;
@@ -46,11 +48,14 @@ WCR_BOOL_PROPERTY(yinYangEnabled, setYinYangEnabled)
 WCR_BOOL_PROPERTY(transferAmountEnabled, setTransferAmountEnabled)
 WCR_BOOL_PROPERTY(transferPersistOnExitChat, setTransferPersistOnExitChat)
 WCR_BOOL_PROPERTY(diagnosticHooksEnabled, setDiagnosticHooksEnabled)
+WCR_BOOL_PROPERTY(menuEntryEnabled, setMenuEntryEnabled)
+WCR_BOOL_PROPERTY(floatingEntryEnabled, setFloatingEntryEnabled)
 
 - (void)reset {
     for (NSString *key in @[@"enabled", @"textEnabled", @"imageEnabled", @"messageTimeEnabled",
                             @"messageSortEnabled", @"chatTimeEnabled", @"yinYangEnabled",
-                            @"transferAmountEnabled", @"transferPersistOnExitChat", @"diagnosticHooksEnabled"]) {
+                            @"transferAmountEnabled", @"transferPersistOnExitChat", @"diagnosticHooksEnabled",
+                            @"menuEntryEnabled", @"floatingEntryEnabled"]) {
         [_defaults removeObjectForKey:key];
     }
     [_defaults synchronize];
