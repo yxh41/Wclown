@@ -20,15 +20,26 @@ static CGPoint gEntryOrigin = {0, 0};
 
 + (void)installIfNeeded {
     if (![WCRClownConfig shared].floatingEntryEnabled) return;
-    if (gEntryWindow) { gEntryWindow.hidden = NO; return; }
-    // 延迟到首个 runloop：构造 UIWindow 必须在主线程且 app 已完成基本启动
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            [self wcr_buildWindow];
-        } @catch (NSException *e) {
-            NSLog(@"[WCRClown] entry install failed: %@", e);
-        }
+    // 关键：tweak 在 %ctor 加载时通常还没有 foreground-active scene，只试一次会永远
+    // 建不出 window（表现＝看不到悬浮按钮）。改为注册「每次回到前台都重试」，幂等。
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                         object:nil
+                                                          queue:NSOperationQueue.mainQueue
+                                                     usingBlock:^(__unused NSNotification *note) {
+            if (![WCRClownConfig shared].floatingEntryEnabled) return;
+            if (gEntryWindow) { gEntryWindow.hidden = NO; return; }
+            @try {
+                [self wcr_buildWindow];
+                NSLog(@"[WCRClown] floating entry ready: %@", gEntryWindow ? @"yes" : @"no scene");
+            } @catch (NSException *e) {
+                NSLog(@"[WCRClown] entry install failed: %@", e);
+            }
+        }];
     });
+    // 也立刻试一次（已在前台时立即生效）
+    [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationDidBecomeActiveNotification object:nil];
 }
 
 + (void)setVisible:(BOOL)visible {
