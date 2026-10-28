@@ -73,6 +73,20 @@ if 'com.tencent.xin' not in plist:
 if 'THEOS_PACKAGE_SCHEME = roothide' not in makefile:
     errors.append('THEOS_PACKAGE_SCHEME must be roothide')
 
+# 8) control 必须是合法 dpkg 控制文件：不支持 # 注释，字段行必须含冒号
+#    （曾在 control 里加 # 注释导致整个包装不上）
+control_txt = read(root / 'control')
+for i, ln in enumerate(control_txt.split('\n'), 1):
+    if not ln.strip():
+        continue
+    if ln.startswith('#'):
+        errors.append(f'control line {i}: dpkg control does not support # comments -> {ln[:40]}')
+    elif ':' not in ln:
+        errors.append(f'control line {i}: missing field colon -> {ln[:40]}')
+for field in ('Package:', 'Name:', 'Version:', 'Architecture:'):
+    if not any(l.startswith(field) for l in control_txt.split('\n')):
+        errors.append(f'control missing required field {field}')
+
 print('files', len(src_files), 'errors', len(errors))
 for e in errors:
     print('ERROR', e)
