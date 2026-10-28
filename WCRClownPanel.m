@@ -1,5 +1,6 @@
 #import "WCRClownPanel.h"
 #import "WCRClownConfig.h"
+#import "WCRClownEntry.h"
 #import <objc/runtime.h>
 
 static NSString *const kWCRClownToggleCellID = @"WCRClownToggleCell";
@@ -43,6 +44,10 @@ static char kWCRClownSwitchKeyChar;
         ],
         @[
             @{@"t": @"启用诊断 Hook", @"k": @"diagnosticHooksEnabled", @"d": @"下次启动微信后生效"}
+        ],
+        @[
+            @{@"t": @"悬浮入口",     @"k": @"floatingEntryEnabled", @"d": @"显示可拖动的悬浮按钮，点击打开本面板"},
+            @{@"t": @"长按菜单入口", @"k": @"menuEntryEnabled",     @"d": @"往微信长按菜单注入「小丑」；历史版本会闪退，默认关闭"}
         ]
     ];
     NSString *build = @"unknown";
@@ -53,7 +58,8 @@ static char kWCRClownSwitchKeyChar;
     }
     self.footers = @[
         @"所有修改仅影响本机显示，不改动服务器数据；返回会话后重新渲染即可看到效果。",
-        [@"诊断 Hook 会在下次启动微信时打印候选类/selector 存在性（idevicesyslog 可见）。\n当前构建: " stringByAppendingString:build]
+        [@"诊断 Hook 会在下次启动微信时打印候选类/selector 存在性（idevicesyslog 可见）。\n当前构建: " stringByAppendingString:build],
+        @"悬浮入口是打开本面板的安全方式（不触碰微信内部数据）。长按菜单入口仅供排查用，开启后若微信闪退请立即关掉。"
     ];
 }
 
@@ -73,6 +79,8 @@ static char kWCRClownSwitchKeyChar;
     NSString *key = objc_getAssociatedObject(sender, &kWCRClownSwitchKeyChar);
     if (key.length == 0) return;
     [[WCRClownConfig shared] setValue:@(sender.on) forKey:key];
+    // 悬浮入口即时生效，省去重启微信（其余开关随渲染/下次启动生效）
+    if ([key isEqualToString:@"floatingEntryEnabled"]) [WCRClownEntry setVisible:sender.on];
 }
 
 #pragma mark - Table view data source
