@@ -102,7 +102,9 @@ static void WCRLogCompatibility(void) {
         WCRClownConfig *cfg = [WCRClownConfig shared];
         if (!cfg.enabled || !cfg.textEnabled) return;
         // 仅文本消息 Cell：响应 getRichTextView（TextMessageCellView）。图片/语音等类型不动。
-        if (![self respondsToSelector:NSSelectorFromString(@"getRichTextView")]) return;
+        // 注意：%hook 内 self 的静态类型是被 hook 类的前向声明，直接向它发 respondsToSelector:
+        // 会触发 "receiver type ... is a forward declaration"（-Werror 直接红），必须 (id) 中转。
+        if (![(id)self respondsToSelector:NSSelectorFromString(@"getRichTextView")]) return;
         id wrap = WCRCellWrap(self, vm);
         if (!wrap) wrap = WCRSafeCall0(self, NSSelectorFromString(@"getCurrentMessageWrap"));
         if (!wrap) return;
