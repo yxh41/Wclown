@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "WCRClownConfig.h"
 #import "WCRClownStore.h"
 #import "WCRClownRuntime.h"
@@ -200,16 +201,15 @@ static UIMenu *WCRInvokeOrigProvider(id origProvider, id elements) {
 %end
 %end
 
-#pragma mark - 长按菜单注入 0.2.0：单点、非原地、多级项安全
-// 0.1.0 真机日志结论：
-//   sig filteredMenuItems: ret=@ enc=@24@0:8@16 / generateOperationMenu ret=@ / operationMenuItems ret=@
-//   链路：generateOperationMenu -> filteredMenuItems: -> onShowOperationMenu（MMMenuController setMenuItems: 未调用）
-//   菜单项 proto=MMMenuItem；MMMenuItem / MMMultiMenuItem / MMMenuController 均存在。
-// 0.1.0 两个问题根因：
-//   ① 当数组本身是可变 __NSArrayM 时原地 addObject，改动了微信自己的菜单数组 -> 非文字消息闪退/抖动；
-//   ② 多级菜单容器 MMMultiMenuItem 被当普通项克隆 -> 渲染异常。
-// 0.2.0 铁律：只在 filteredMenuItems: 单点追加；永远新建 NSMutableArray，绝不改原数组；
-//   多级项("Multi")与无法安全克隆的项一律跳过；绝不退回原生 UIMenuItem。
+#pragma mark - 长按菜单注入 0.3.0：MMMenuItem 克隆 + 安全 canPerformAction + 延迟弹出编辑器
+// 0.2.0 日志结论：
+//   ① protoClass=MMMenuItem 但 skip append -> MMMenuItem 不是 UIMenuItem 子类（0.2.0 的 isKindOfClass 判断误杀）；
+//   ② MMMenuController -setMenuItems: 确实被调用；链路 generateOperationMenu -> filteredMenuItems: -> setMenuItems: -> onShowOperationMenu；
+//   ③ 点「小丑」有 key 但编辑器没弹出 -> 在菜单收起动画中 present 被吞；
+//   ④ 0.2.0 未加任何项仍闪退 -> canPerformAction 里手工 class_getMethodImplementation(super,_cmd) 可能拿到
+//      _objc_msgForward，直接调用必崩。
+// 0.3.0：允许任意可 copy + setAction 的菜单项（含 MMMenuItem）；canPerformAction 走 objc_msgSendSuper；
+//   点击后延迟 0.45s 再 present，并带完整日志。
 
 static char gWCRFilteredRet = 0;
 static char gWCRGenRet = 0;
@@ -251,20 +251,22 @@ static void WCRProbeSignatures(void) {
     WCRLog("sig operationMenuItems ret=%c enc=%@", gWCRImgOpRet ? gWCRImgOpRet : '?', gWCRImgOpEnc ?: @"nil");
 }
 
-// 只克隆「普通单级菜单项」；多级容器(MMMultiMenuItem)或无法安全设置 title/action 的一律返回 nil
+// 克隆任意可 copy + setAction 的菜单项（MMMenuItem 不是 UIMenuItem 子类，不能按 UIMenuItem 过滤）
 static id WCRMakeClownItem(NSArray *existing) {
     if (existing.count == 0) return nil;
     id proto = existing.firstObject;
-    if (![proto isKindOfClass:[UIMenuItem class]]) return nil;
     NSString *pcn = NSStringFromClass([proto class]);
-    if (pcn && [pcn rangeOfString:@"Multi"].location != NSNotFound) return nil;
+    if (pcn && [pcn rangeOfString:@"Multi"].location != NSNotFound) return nil;   // 多级容器不克隆
     id clone = nil;
-    @try { clone = [proto copy]; } @catch (NSException *e) { }
+    @try { if ([proto respondsToSelector:@selector(copy)]) clone = [proto copy]; } @catch (NSException *e) { }
     if (!clone) return nil;
     @try {
-        if (![clone respondsToSelector:@selector(setTitle:)] ||
-            ![clone respondsToSelector:@selector(setAction:)]) return nil;
-        [clone setTitle:@"小丑"];
+        if (![clone respondsToSelector:@selector(setAction:)]) return nil;
+        if ([clone respondsToSelector:@selector(setTitle:)]) {
+            [clone setTitle:@"小丑"];
+        } else {
+            [clone setValue:@"小丑" forKey:@"title"];
+        }
         [clone setAction:@selector(wcr_clownMenuItemTapped:)];
     } @catch (NSException *e) { return nil; }
     return clone;
@@ -290,6 +292,30 @@ static id WCRAppendClownToItems(id items) {
            (unsigned long)a.count, (unsigned long)m.count,
            NSStringFromClass([a.firstObject class]));
     return m;
+}
+
+// 取最上层可用 presenter（遍历前台 scene 的 window，再沿 presented 链走到最顶）
+static UIViewController *WCRPresenterVC(void) {
+    UIWindow *keyWin = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { keyWin = w; break; } }
+        if (!keyWin) keyWin = ws.windows.firstObject;
+        if (keyWin) break;
+    }
+    if (!keyWin) {
+        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]]) {
+                keyWin = ((UIWindowScene *)sc).windows.firstObject;
+                break;
+            }
+        }
+    }
+    UIViewController *vc = keyWin.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
 }
 
 %group WCREntry
@@ -324,30 +350,33 @@ static id WCRAppendClownToItems(id items) {
 }
 - (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
     if (sel_isEqual(action, @selector(wcr_clownMenuItemTapped:))) return YES;
-    Class sup = class_getSuperclass(object_getClass(self));
-    IMP imp = sup ? class_getMethodImplementation(sup, _cmd) : NULL;
-    if (imp) {
-        typedef BOOL (*WCRFn)(id, SEL, SEL, id);
-        return ((WCRFn)(void *)imp)(self, _cmd, action, sender);
-    }
-    return NO;
+    struct objc_super sup = { self, class_getSuperclass(object_getClass(self)) };
+    if (!sup.super_class) return NO;
+    return ((BOOL (*)(struct objc_super *, SEL, SEL, id))objc_msgSendSuper)(&sup, _cmd, action, sender);
 }
 %new
 - (void)wcr_clownMenuItemTapped:(id)sender {
     (void)sender;
     id wrap = WCRCellWrap(self, nil);
     NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
-    WCRLog("entry 小丑 tapped key=%@", key);
-    if (key.length) {
-        UIViewController *top = WCRTopController();
-        if (top) {
+    WCRLog("entry 小丑 tapped key=%@ wrap=%@", key, wrap ? NSStringFromClass([wrap class]) : @"nil");
+    if (!key.length) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            UIViewController *top = WCRPresenterVC();
+            WCRLog("entry presenting editor top=%@", top ? NSStringFromClass([top class]) : @"nil");
+            if (!top) return;
             WCRClownEditorViewController *ed =
                 [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:ed];
             nav.modalPresentationStyle = UIModalPresentationPageSheet;
-            [top presentViewController:nav animated:YES completion:nil];
+            [top presentViewController:nav animated:YES completion:^{
+                WCRLog("entry editor presented");
+            }];
+        } @catch (NSException *e) {
+            WCRLog("entry present editor exc: %@", e);
         }
-    }
+    });
 }
 %end
 
@@ -355,7 +384,7 @@ static id WCRAppendClownToItems(id items) {
 - (id)operationMenuItems {
     id r = %orig;
     @try {
-        WCRLog("entry operationMenuItems fired ret=%c (passthrough)", gWCRImgOpRet ? gWCRImgOpRet : '?');
+        WCRLog("entry operationMenuItems fired ret=%c", gWCRImgOpRet ? gWCRImgOpRet : '?');
         if (gWCRImgOpRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
     } @catch (NSException *e) { WCRLog("entry operationMenuItems exc: %@", e); }
     return r;
@@ -365,7 +394,7 @@ static id WCRAppendClownToItems(id items) {
 %hook MMMenuController
 - (void)setMenuItems:(id)items {
     (void)items;
-    WCRLog("entry MMMenuController setMenuItems fired (passthrough)");
+    WCRLog("entry MMMenuController setMenuItems (passthrough)");
     %orig;
 }
 %end
@@ -373,7 +402,7 @@ static id WCRAppendClownToItems(id items) {
 %hook UIMenuController
 - (void)setMenuItems:(id)items {
     (void)items;
-    WCRLog("entry UIMenuController setMenuItems fired (passthrough)");
+    WCRLog("entry UIMenuController setMenuItems (passthrough)");
     %orig;
 }
 %end
