@@ -27,7 +27,7 @@ static NSString *const kWCRClownDefaults = @"com.zlhkf.wclown";
             @"transferAmountEnabled": @NO,
             @"transferPersistOnExitChat": @NO,
             @"diagnosticHooksEnabled": @NO,
-            @"menuEntryEnabled": @NO,          // 长按菜单注入默认关（历史闪退）
+            @"menuEntryEnabled": @YES,         // 长按菜单注入默认开（已加 UIMenuItem 类型护栏，不再闪退）
             @"floatingEntryEnabled": @YES      // 悬浮入口默认开（零风险）
         }];
     }
