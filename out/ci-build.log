@@ -1,0 +1,57 @@
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all for tweak WCRClownStandalone…[m
+[0;31m==> [1;39mPreprocessing Tweak.xm…[m
+[0;32m==> [1;39mCompiling Tweak.xm (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownConfig.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownStore.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownRuntime.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownEntryInstaller.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownPanel.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownEntry.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownLog.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownLogView.m (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownEditor.m (arm64)…[m
+[0;33m==> [1;39mLinking tweak WCRClownStandalone (arm64)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for WCRClownStandalone…[m
+[0;34m==> [1;39mStripping WCRClownStandalone (arm64)…[m
+[0;31m==> [1;39mPreprocessing Tweak.xm…[m
+[0;32m==> [1;39mCompiling Tweak.xm (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownConfig.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownStore.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownRuntime.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownEntryInstaller.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownPanel.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownEntry.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownLog.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownLogView.m (arm64e)…[m
+[0;32m==> [1;39mCompiling WCRClownEditor.m (arm64e)…[m
+[0;33m==> [1;39mLinking tweak WCRClownStandalone (arm64e)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for WCRClownStandalone…[m
+[0;34m==> [1;39mStripping WCRClownStandalone (arm64e)…[m
+[0;34m==> [1;39mMerging tweak WCRClownStandalone…[m
+[0;34m==> [1;39mSigning WCRClownStandalone…[m
+[1;31m> [1;3;39mMaking all in Preferences…[m
+[0;36m==> [1;36mNotice:[m Build may be slow as Theos isn’t using all available CPU cores on this computer. Consider upgrading GNU Make: https://theos.dev/docs/parallel-building
+[1;31m> [1;3;39mMaking all for bundle WCRClownSettings…[m
+[0;35m==> [1;39mCopying resource directories into the bundle wrapper…[m
+[0;32m==> [1;39mCompiling WCRClownSettingsController.m (arm64)…[m
+[0;33m==> [1;39mLinking bundle WCRClownSettings (arm64)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for WCRClownSettings…[m
+[0;34m==> [1;39mStripping WCRClownSettings (arm64)…[m
+[0;32m==> [1;39mCompiling WCRClownSettingsController.m (arm64e)…[m
+[0;33m==> [1;39mLinking bundle WCRClownSettings (arm64e)…[m
+ld: warning: -multiply_defined is obsolete
+[0;34m==> [1;39mGenerating debug symbols for WCRClownSettings…[m
+[0;34m==> [1;39mStripping WCRClownSettings (arm64e)…[m
+[0;34m==> [1;39mMerging bundle WCRClownSettings…[m
+[0;34m==> [1;39mSigning WCRClownSettings…[m
+[1;31m> [1;3;39mMaking stage for tweak WCRClownStandalone…[m
+[1;31m> [1;3;39mMaking stage in Preferences…[m
+[1;31m> [1;3;39mMaking stage for bundle WCRClownSettings…[m
+# theos 的 bundle.mk 不会自动把 bundle 根的 Info.plist 打进 .bundle；缺它则
+# NSPrincipalClass(WCRClownSettingsController) 加载失败，设置页只剩文字、开关不渲染。
+# 这里在 staging 阶段强制拷入（与上面 dylib/entry.plist 拷入同一上下文、repo 根路径）。
+dm.pl: building package `com.zlhkf.wclown:iphoneos-arm64e' in `./packages/com.zlhkf.wclown_0.4.5-recover+242e432_iphoneos-arm64e.deb'
