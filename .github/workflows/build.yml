@@ -75,10 +75,10 @@ jobs:
           HASH=$(git rev-parse --short=7 HEAD 2>/dev/null || echo dev)
           echo "BUILD_HASH=$HASH" >> "$GITHUB_ENV"
           # control Version 追加 +<hash>，deb 永远自报自己的 commit
-          sed -i '' -E "s|^Version:.*|Version: 0.4.3-recover+$HASH|" control
+          sed -i '' -E "s|^Version:.*|Version: 0.4.4-recover+$HASH|" control
           echo "Patched control Version -> $(grep '^Version:' control)"
           # 运行时日志 kWCRClownBuildTag 同步追加 +<hash>，设置页/系统日志一眼核对是否新包
-          sed -i '' -E "s|(kWCRClownBuildTag\[\] = \")[^\"]*(\")|\1wcrclown-0.4.3-recover+$HASH\2|" Tweak.xm
+          sed -i '' -E "s|(kWCRClownBuildTag\[\] = \")[^\"]*(\")|\1wcrclown-0.4.4-recover+$HASH\2|" Tweak.xm
           echo "Patched build tag -> $(grep 'kWCRClownBuildTag' Tweak.xm)"
 
       - name: Build roothide .deb

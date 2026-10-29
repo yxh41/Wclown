@@ -23,7 +23,7 @@
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
-__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.3-recover";
+__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.4-recover";
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
 static id WCRCellWrap(id cell, id vm) {
@@ -237,6 +237,71 @@ static void WCRBindOverrideToVM(id vm, id cell) {
 }
 %end
 %end
+
+#pragma mark - 保存后主动扫描刷新（绕开「微信何时重渲染」）
+// 0.4.3 真机：apply hooks installed 正常，但 ALIVE / override 一行都没有 ⇒ TextMessageCellView 的
+// setViewModel: / layoutContentView 在真机上并未被走到（首屏渲染发生在 tweak 注入之前）。
+// 与其等它触发，不如编辑保存后主动扫一遍屏幕上的文本 Cell，按 key 命中后直接改 RichTextView。
+// 日志报 windows / textCells / matched / written，任一环节断了都能一眼定位。
+static void WCRCollectTextCells(UIView *v, Class tm, NSMutableArray *out, int depth) {
+    if (!v || depth > 40) return;
+    if ([v isKindOfClass:tm]) { [out addObject:v]; return; }
+    for (UIView *sub in v.subviews) WCRCollectTextCells(sub, tm, out, depth + 1);
+}
+
+__attribute__((visibility("default")))
+void WCRForceRefreshVisibleTextCellsForKey(NSString *targetKey) {
+    @try {
+        Class tm = NSClassFromString(@"TextMessageCellView");
+        if (!tm) { WCRLog("forceScan: TextMessageCellView class MISSING"); return; }
+        NSMutableArray *cells = [NSMutableArray array];
+        NSInteger windows = 0;
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.hidden) continue;
+                windows++;
+                WCRCollectTextCells(w, tm, cells, 0);
+            }
+        }
+        WCRLog("forceScan: windows=%ld textCells=%lu targetKey=%@", (long)windows, (unsigned long)cells.count, targetKey);
+        if (!cells.count) return;
+        NSString *replacement = WCROverrideTextForKey(targetKey);
+        if (!replacement) { WCRLog("forceScan: NO override in store for targetKey"); return; }
+        NSInteger matched = 0, written = 0;
+        for (id cell in cells) {
+            id wrap = WCRCellWrap(cell, nil);
+            NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+            if (![key isEqualToString:targetKey]) continue;
+            matched++;
+            id rtv = WCRSafeCall0(cell, NSSelectorFromString(@"getRichTextView"));
+            if (!rtv) { WCRLog("forceScan: matched but richTextView nil"); continue; }
+            WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
+            WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
+            WCRBindOverrideToVM(WCRSafeCall0(cell, NSSelectorFromString(@"viewModel")), cell);
+            written++;
+        }
+        WCRLog("forceScan: matched=%ld written=%ld len=%lu", (long)matched, (long)written, (unsigned long)replacement.length);
+        if (!matched) {
+            // 打样本：直接对比「扫描算出的 key」与「保存时的 targetKey」差在哪
+            NSInteger shown = 0;
+            for (id cell in cells) {
+                if (shown >= 4) break;
+                id wrap = WCRCellWrap(cell, nil);
+                NSString *k = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : @"(no wrap)";
+                id rtv = WCRSafeCall0(cell, NSSelectorFromString(@"getRichTextView"));
+                id cur = rtv ? WCRSafeCall0(rtv, NSSelectorFromString(@"getContent")) : nil;
+                NSString *desc = [cur description] ?: @"(nil)";
+                if (desc.length > 30) desc = [[desc substringToIndex:30] stringByAppendingString:@"..."];
+                WCRLog("forceScan: sample key=%@ curType=%@ cur=%@ cellClass=%@",
+                       k, NSStringFromClass(object_getClass(cur)), desc, NSStringFromClass(object_getClass(cell)));
+                shown++;
+            }
+        }
+    } @catch (NSException *e) {
+        WCRLog("forceScan exception: %@", e);
+    }
+}
 
 #pragma mark - 长按菜单注入（UIContextMenuConfiguration 路径，8.0.71 实测不走，仅旧版本/其他 App 兼容）
 // ⚠️ 实测结论（微信 8.0.71）：UIContextMenuConfiguration 工厂**从不触发**（日志无 ctx factory called），

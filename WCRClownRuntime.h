@@ -11,6 +11,8 @@ FOUNDATION_EXPORT void WCRSafeSetUInt32(id _Nullable object, NSString *selectorN
 FOUNDATION_EXPORT void WCRSafeSetBool(id _Nullable object, NSString *selectorName, BOOL value);
 FOUNDATION_EXPORT void WCRSafeSetObject(id _Nullable object, NSString *selectorName, id _Nullable value);
 FOUNDATION_EXPORT BOOL WCRClassAndSelectorAvailable(NSString *className, NSString *selectorName);
+// 保存后主动扫描当前屏幕的文本 Cell 并按 key 直接刷新 RichTextView（不依赖微信重渲染时机）
+FOUNDATION_EXPORT void WCRForceRefreshVisibleTextCellsForKey(NSString * _Nullable targetKey);
 
 @interface WCRClownRuntime : NSObject
 + (void)applyOverridesToMessage:(id)wrap session:(nullable NSString *)session;
