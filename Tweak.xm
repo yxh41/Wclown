@@ -15,6 +15,9 @@
 // 否则 -Werror 下报 no known instance method for selector。仅用于消除编译告警，运行期走真实实现。
 @interface NSObject (WCRMMMenuItemInit)
 - (instancetype)initWithTitle:(NSString *)title target:(id)target action:(SEL)action;
+// diag16 二进制权威确认：MMMenuItem 还有带图标的构造器 initWithTitle:icon:target:action:
+// （@48@0:8@16@24@32:40 = title/icon/target/action），以及 setIconImage:。
+- (instancetype)initWithTitle:(NSString *)title icon:(id)icon target:(id)target action:(SEL)action;
 @end
 
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
@@ -71,26 +74,50 @@ static void WCRLogCompatibility(void) {
         @[@"BaseMsgContentViewController", @"viewDidDisappear:"],
         @[@"BaseMsgContentViewController", @"viewWillBePoped:"],
         @[@"UILabel", @"setText:"],
-        @[@"UILabel", @"setAttributedText:"]
+        @[@"UILabel", @"setAttributedText:"],
+        @[@"TextMessageCellView", @"getRichTextView"],
+        @[@"TextMessageCellView", @"getTextString"],
+        @[@"TextMessageViewModel", @"contentText"],
+        @[@"RichTextView", @"setContent:"],
+        @[@"RichTextView", @"forceDisplayInSync"],
+        @[@"MMMenuItem", @"setIconImage:"]
     ];
     for (NSArray<NSString *> *entry in candidates) {
         WCRLog("compat %@ %@: %@", entry[0], entry[1], WCRClassAndSelectorAvailable(entry[0], entry[1]) ? @"available" : @"missing");
     }
 }
 
-#pragma mark - 应用覆盖到消息渲染（在 hook 前改数据，让 Cell 渲染读到覆盖）
+#pragma mark - 应用覆盖到文本消息渲染（微信 8.0.71 MVVM：改 wrap 无效，改 RichTextView.content）
+// 根因（diag23 砸壳二进制权威确认）：TextMessageViewModel 在 initWithMessageWrap:contact:chatContact:
+// 构造时就把 wrap.m_nsContent 预排版进 contentText / contentTextStyles 缓存；真正显示文字的是
+// TextMessageCellView.getRichTextView（RichTextView），它读的是 viewModel 缓存值，不读 wrap.m_nsContent。
+// ⇒ 旧版在 setViewModel: 前改 wrap.m_nsContent「太晚」，界面纹丝不动（0.4.1 用户实测「编辑没效果」）。
+// 正确做法：%orig（微信按原数据渲染完、RichTextView 已建好）之后，用 key 查覆盖，
+// 直接对 RichTextView setContent: + forceDisplayInSync（RichTextView 默认异步绘制，必须强制同步）。
 %group WCRApply
 %hook BaseMessageCellView
 - (void)setViewModel:(id)vm {
+    %orig;
     @try {
-        if ([WCRClownConfig shared].enabled) {
-            id wrap = WCRCellWrap(self, vm);
-            if (wrap) [WCRClownRuntime applyOverridesToMessage:wrap session:nil];
-        }
+        WCRClownConfig *cfg = [WCRClownConfig shared];
+        if (!cfg.enabled || !cfg.textEnabled) return;
+        // 仅文本消息 Cell：响应 getRichTextView（TextMessageCellView）。图片/语音等类型不动。
+        if (![self respondsToSelector:NSSelectorFromString(@"getRichTextView")]) return;
+        id wrap = WCRCellWrap(self, vm);
+        if (!wrap) wrap = WCRSafeCall0(self, NSSelectorFromString(@"getCurrentMessageWrap"));
+        if (!wrap) return;
+        NSString *key = [WCRClownStore.shared messageKeyForWrap:wrap session:nil];
+        NSDictionary *entry = key.length ? [WCRClownStore.shared overridesForKey:key] : nil;
+        NSString *replacement = entry[@"text"];
+        if (!replacement.length) return;
+        id rtv = WCRSafeCall0(self, NSSelectorFromString(@"getRichTextView"));
+        if (!rtv) { WCRLog("apply: richTextView nil key=%@", key); return; }
+        WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
+        WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
+        WCRLog("apply: richText override key=%@ newLen=%lu", key, (unsigned long)replacement.length);
     } @catch (NSException *e) {
         WCRLog("apply exception: %@", e);
     }
-    %orig;
 }
 %end
 %end
@@ -314,22 +341,57 @@ static UIViewController *WCRFrontChatVC(void);
 // （这就是为什么旧版小丑完全不出现）。MMMenuItem 无 setAction: / 无 initWithTitle:action:，
 // 旧代码用它们兜底必然失败——这里直接用对的构造器。
 // MMMenuItem 不可用（极旧微信/其它 App）时退回系统 UIMenuItem 作兼容。
+// 「小丑」菜单图标：用 🤡 emoji 绘制成 UIImage（无需图片资源，随包走，一份代码跨尺寸）。
+// MMMenuItem 图标槽位常规 26pt；关掉不透明以保留透明边角。
+static UIImage *WCRClownIconImage(void) {
+    static UIImage *icon = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        CGSize sz = CGSizeMake(26.0, 26.0);
+        UIGraphicsBeginImageContextWithOptions(sz, NO, 0.0);
+        NSDictionary *attrs = @{ NSFontAttributeName: [UIFont systemFontOfSize:22.0] };
+        [@"\U0001F921" drawInRect:CGRectMake(0.0, 0.0, sz.width, sz.height) withAttributes:attrs];
+        icon = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    });
+    return icon;
+}
+
 static id WCRMakeClownItem(NSArray *existing, NSString *payloadKey) {
     SEL act = @selector(wcr_clownMenuItemTapped);
     Class mm = NSClassFromString(@"MMMenuItem");
-    if (mm && [mm instancesRespondToSelector:@selector(initWithTitle:target:action:)]) {
-        @try {
-            id item = [[mm alloc] initWithTitle:@"小丑" target:gWCRTapHandler action:act];
-            if (item) {
-                if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
-                    [item setAccessibilityLabel:@"wcr.clown"];
-                if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)]) {
-                    // 走 performSelector 避免向 id 发送未声明 selector 在 -Werror 下报错
-                    (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+    UIImage *icon = WCRClownIconImage();
+    if (mm) {
+        // 优先带图标构造器（diag16 二进制权威确认 initWithTitle:icon:target:action: 存在）
+        if ([mm instancesRespondToSelector:@selector(initWithTitle:icon:target:action:)]) {
+            @try {
+                id item = [[mm alloc] initWithTitle:@"小丑" icon:icon target:gWCRTapHandler action:act];
+                if (item) {
+                    if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
+                        [item setAccessibilityLabel:@"wcr.clown"];
+                    if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)])
+                        (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+                    WCRLog("entry clown item WITH icon (ctor)");
+                    return item;
                 }
-                return item;
-            }
-        } @catch (NSException *e) { WCRLog("entry mm item exc: %@", e); }
+            } @catch (NSException *e) { WCRLog("entry icon ctor exc: %@", e); }
+        }
+        // 兜底 1：无图标构造器 + setIconImage:（MMMenuItem 有此 setter，diag16 确认）
+        if ([mm instancesRespondToSelector:@selector(initWithTitle:target:action:)]) {
+            @try {
+                id item = [[mm alloc] initWithTitle:@"小丑" target:gWCRTapHandler action:act];
+                if (item) {
+                    BOOL hasIconSetter = [item respondsToSelector:NSSelectorFromString(@"setIconImage:")];
+                    if (hasIconSetter && icon) WCRSafeCall1(item, NSSelectorFromString(@"setIconImage:"), icon);
+                    if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
+                        [item setAccessibilityLabel:@"wcr.clown"];
+                    if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)])
+                        (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+                    WCRLog("entry clown item icon via setter=%d", hasIconSetter ? 1 : 0);
+                    return item;
+                }
+            } @catch (NSException *e) { WCRLog("entry mm item exc: %@", e); }
+        }
     }
     return [[UIMenuItem alloc] initWithTitle:@"小丑" action:act];
 }
