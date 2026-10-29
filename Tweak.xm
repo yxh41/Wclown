@@ -200,114 +200,193 @@ static UIMenu *WCRInvokeOrigProvider(id origProvider, id elements) {
 %end
 %end
 
-#pragma mark - 探针 0.0.9：纯旁路观察微信 8.0.71 真实长按菜单链路（零行为改动）
-// 0.0.8 闪退根因：对 generateOperationMenu* 的 %orig 返回值当成 id 解引用，真实返回可能是 void
-// -> 垃圾指针 EXC_BAD_ACCESS。本版铁律：**任何 hook 都不解引用 %orig 返回值**，只原样透传；
-// 只打印「是否命中」与 setMenuItems: 的入参（入参按契约一定是数组，安全）。
-// 绝不追加、绝不覆盖 canPerformAction、绝不加 %new。目的只有一个：真机长按一次，
-// 确认到底哪个方法被调用、菜单项是什么类。
+#pragma mark - 长按菜单注入 0.1.0：在微信原生菜单项数组里追加「小丑」（同类型克隆，安全）
+// 结论（逆向 WCRefine 2.1-8）：
+//   BaseMessageCellView -filteredMenuItems: 返回菜单项数组；-generateOperationMenu 为生成（可能 void）；
+//   MMMenuController / UIMenuController -setMenuItems: 接收最终菜单项数组；菜单项为 UIMenuItem 系。
+// 0.0.8 两处闪退根因：①把 %orig 返回值无条件当 id 解引用（真实可能是 void -> 垃圾指针）；
+// ②硬塞原生 UIMenuItem（现有项可能是 MMMenuItem 子类，微信对其发私有 selector）。
+// 本版对策：运行时读真实返回类型(method_getReturnType)，只有 '@' 才触碰返回值；菜单项用现有项同类克隆，
+// 全程 @try 保护；canPerformAction 不用 Logos %orig，直接调用父类 IMP，规避「仅继承」场景的不确定性。
 
-static void WCRProbeLogClasses(NSString *tag, id arr) {
-    if (!arr) { WCRLog("probe %@ = nil", tag); return; }
-    @try {
-        if (![arr isKindOfClass:[NSArray class]]) {
-            WCRLog("probe %@ not-array class=%@", tag, NSStringFromClass(object_getClass(arr)));
-            return;
+static char gWCRFilteredRet = 0;
+static char gWCRGenRet = 0;
+static char gWCRGenDetailRet = 0;
+static char gWCRImgOpRet = 0;
+static NSString *gWCRFilteredEnc = nil;
+static NSString *gWCRGenEnc = nil;
+static NSString *gWCRImgOpEnc = nil;
+
+static void WCRProbeSignatures(void) {
+    Class c = NSClassFromString(@"BaseMessageCellView");
+    if (c) {
+        Method m = class_getInstanceMethod(c, @selector(filteredMenuItems:));
+        if (m) {
+            char b[32] = {0};
+            method_getReturnType(m, b, sizeof(b));
+            gWCRFilteredRet = b[0];
+            gWCRFilteredEnc = [NSString stringWithUTF8String:method_getTypeEncoding(m)];
         }
-        NSArray *a = (NSArray *)arr;
-        WCRLog("probe %@ count=%lu", tag, (unsigned long)a.count);
-        NSUInteger i = 0;
-        for (id el in a) {
-            if (i >= 8) { WCRLog("   probe %@ ...(more)", tag); break; }
-            WCRLog("   probe %@ [%lu] class=%@", tag, (unsigned long)i, NSStringFromClass(object_getClass(el)));
-            i++;
+        Method g = class_getInstanceMethod(c, @selector(generateOperationMenu));
+        if (g) {
+            char b[32] = {0};
+            method_getReturnType(g, b, sizeof(b));
+            gWCRGenRet = b[0];
+            gWCRGenEnc = [NSString stringWithUTF8String:method_getTypeEncoding(g)];
         }
-    } @catch (NSException *e) {
-        WCRLog("probe %@ inspect exception: %@", tag, e);
+        Method gd = class_getInstanceMethod(c, @selector(generateOperationMenuForRecordDetail));
+        if (gd) {
+            char b[32] = {0};
+            method_getReturnType(gd, b, sizeof(b));
+            gWCRGenDetailRet = b[0];
+        }
     }
+    Class ic = NSClassFromString(@"ImageMessageCellView");
+    if (ic) {
+        Method o = class_getInstanceMethod(ic, @selector(operationMenuItems));
+        if (o) {
+            char b[32] = {0};
+            method_getReturnType(o, b, sizeof(b));
+            gWCRImgOpRet = b[0];
+            gWCRImgOpEnc = [NSString stringWithUTF8String:method_getTypeEncoding(o)];
+        }
+    }
+    WCRLog("sig filteredMenuItems: ret=%c enc=%@", gWCRFilteredRet ? gWCRFilteredRet : '?', gWCRFilteredEnc ?: @"nil");
+    WCRLog("sig generateOperationMenu ret=%c enc=%@", gWCRGenRet ? gWCRGenRet : '?', gWCRGenEnc ?: @"nil");
+    WCRLog("sig operationMenuItems ret=%c enc=%@", gWCRImgOpRet ? gWCRImgOpRet : '?', gWCRImgOpEnc ?: @"nil");
 }
 
-// 只 dump 类自身方法（不遍历父类，避免 UIView 分类方法刷屏）
-static void WCRProbeDumpOwn(Class cls, NSString *label, BOOL filterMenu) {
-    if (!cls) { WCRLog("api %@: MISSING", label); return; }
-    unsigned n = 0;
-    Method *ms = class_copyMethodList(cls, &n);
-    WCRLog("api %@ ownInstanceMethods=%u", label, n);
-    for (unsigned i = 0; i < n; i++) {
-        const char *nm = sel_getName(method_getName(ms[i]));
-        NSString *ns = [NSString stringWithUTF8String:(nm ? nm : "")] ?: @"";
-        if (filterMenu) {
-            NSString *lower = ns.lowercaseString;
-            if (!([lower containsString:@"menu"] || [lower containsString:@"operation"] ||
-                  [lower containsString:@"filtered"] || [lower containsString:@"item"])) continue;
+// 用现有菜单项的同类克隆构造「小丑」项：先 copy 再改 title/action（保留微信私有字段），失败再退回同类 init
+static id WCRMakeClownItem(NSArray *existing) {
+    SEL act = @selector(wcr_clownMenuItemTapped:);
+    id proto = existing.count ? existing.firstObject : nil;
+    if (proto) {
+        id clone = nil;
+        @try { if ([proto respondsToSelector:@selector(copy)]) clone = [proto copy]; } @catch (NSException *e) { }
+        if (clone) {
+            @try {
+                [clone setValue:@"小丑" forKey:@"title"];
+                if ([clone respondsToSelector:@selector(setAction:)]) [clone setAction:act];
+                return clone;
+            } @catch (NSException *e) {
+                WCRLog("entry clone kvc failed: %@", e);
+            }
         }
-        WCRLog("api %@ -%s %s", label, nm, method_getTypeEncoding(ms[i]));
-    }
-    if (ms) free(ms);
-    Class meta = object_getClass(cls);
-    unsigned mn = 0;
-    Method *mms = meta ? class_copyMethodList(meta, &mn) : NULL;
-    for (unsigned i = 0; i < mn; i++) {
-        const char *nm = sel_getName(method_getName(mms[i]));
-        NSString *ns = [NSString stringWithUTF8String:(nm ? nm : "")] ?: @"";
-        if (filterMenu) {
-            NSString *lower = ns.lowercaseString;
-            if (!([lower containsString:@"menu"] || [lower containsString:@"item"])) continue;
+        Class cls = [proto class];
+        if ([cls instancesRespondToSelector:@selector(initWithTitle:action:)]) {
+            @try { return [[cls alloc] initWithTitle:@"小丑" action:act]; } @catch (NSException *e) { }
         }
-        WCRLog("api %@ +%s %s", label, nm, method_getTypeEncoding(mms[i]));
     }
-    if (mms) free(mms);
+    return [[UIMenuItem alloc] initWithTitle:@"小丑" action:act];
 }
 
-%group WCRProbe
+static id WCRAppendClownToItems(id items) {
+    if (![items isKindOfClass:[NSArray class]]) return items;
+    NSArray *a = (NSArray *)items;
+    for (id el in a) {
+        @try { if ([[el valueForKey:@"title"] isEqualToString:@"小丑"]) return items; } @catch (NSException *e) { }
+    }
+    id item = nil;
+    @try { item = WCRMakeClownItem(a); } @catch (NSException *e) { WCRLog("entry make item failed: %@", e); }
+    if (!item) return items;
+    NSMutableArray *m = [a isKindOfClass:[NSMutableArray class]] ? (NSMutableArray *)a : [a mutableCopy];
+    [m addObject:item];
+    WCRLog("entry appended 小丑 (items %lu -> %lu, proto=%@, item=%@)",
+           (unsigned long)a.count, (unsigned long)m.count,
+           a.count ? NSStringFromClass([a.firstObject class]) : @"none",
+           NSStringFromClass([item class]));
+    return m;
+}
+
+%group WCREntry
 %hook BaseMessageCellView
 - (id)filteredMenuItems:(id)arg {
     id r = %orig;
-    WCRLog("probe filteredMenuItems fired argClass=%@",
-           arg ? NSStringFromClass(object_getClass(arg)) : @"nil");
-    return r;   // 原样透传，不解引用、不追加
+    @try {
+        WCRLog("entry filteredMenuItems fired arg=%@ ret=%c",
+               arg ? NSStringFromClass(object_getClass(arg)) : @"nil", gWCRFilteredRet ? gWCRFilteredRet : '?');
+        if (gWCRFilteredRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
+    } @catch (NSException *e) { WCRLog("entry filteredMenuItems exc: %@", e); }
+    return r;
 }
 - (id)generateOperationMenu {
     id r = %orig;
-    WCRLog("probe generateOperationMenu fired");
-    return r;   // 原样透传
+    @try {
+        WCRLog("entry generateOperationMenu fired ret=%c", gWCRGenRet ? gWCRGenRet : '?');
+        if (gWCRGenRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
+    } @catch (NSException *e) { WCRLog("entry generateOperationMenu exc: %@", e); }
+    return r;
 }
 - (id)generateOperationMenuForRecordDetail {
     id r = %orig;
-    WCRLog("probe generateOperationMenuForRecordDetail fired");
+    @try {
+        if (gWCRGenDetailRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
+    } @catch (NSException *e) { }
     return r;
 }
-- (void)showOperationMenu {
-    WCRLog("probe showOperationMenu fired");
-    %orig;
+- (id)showOperationMenu {
+    id r = %orig;
+    WCRLog("entry showOperationMenu fired");
+    return r;
 }
-- (void)onShowOperationMenu {
-    WCRLog("probe onShowOperationMenu fired");
-    %orig;
+- (id)onShowOperationMenu {
+    id r = %orig;
+    WCRLog("entry onShowOperationMenu fired");
+    return r;
+}
+- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
+    if (sel_isEqual(action, @selector(wcr_clownMenuItemTapped:))) return YES;
+    Class sup = class_getSuperclass(object_getClass(self));
+    IMP imp = sup ? class_getMethodImplementation(sup, _cmd) : NULL;
+    if (imp) {
+        typedef BOOL (*WCRFn)(id, SEL, SEL, id);
+        return ((WCRFn)(void *)imp)(self, _cmd, action, sender);
+    }
+    return NO;
+}
+%new
+- (void)wcr_clownMenuItemTapped:(id)sender {
+    (void)sender;
+    id wrap = WCRCellWrap(self, nil);
+    NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+    WCRLog("entry 小丑 tapped key=%@", key);
+    if (key.length) {
+        UIViewController *top = WCRTopController();
+        if (top) {
+            WCRClownEditorViewController *ed =
+                [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:ed];
+            nav.modalPresentationStyle = UIModalPresentationPageSheet;
+            [top presentViewController:nav animated:YES completion:nil];
+        }
+    }
 }
 %end
 
 %hook ImageMessageCellView
 - (id)operationMenuItems {
     id r = %orig;
-    WCRLog("probe operationMenuItems fired");
+    @try {
+        WCRLog("entry operationMenuItems fired ret=%c", gWCRImgOpRet ? gWCRImgOpRet : '?');
+        if (gWCRImgOpRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
+    } @catch (NSException *e) { WCRLog("entry operationMenuItems exc: %@", e); }
     return r;
 }
 %end
 
 %hook MMMenuController
 - (void)setMenuItems:(id)items {
-    WCRLog("probe MMMenuController setMenuItems fired");
-    WCRProbeLogClasses(@"MMMenuController.items", items);
-    %orig;
+    id aug = items;
+    @try { aug = WCRAppendClownToItems(items); } @catch (NSException *e) { WCRLog("entry MMMenuController setMenuItems exc: %@", e); }
+    %orig(aug);
 }
 %end
 
 %hook UIMenuController
 - (void)setMenuItems:(id)items {
-    WCRLog("probe UIMenuController setMenuItems fired");
-    WCRProbeLogClasses(@"UIMenuController.items", items);
-    %orig;
+    id aug = items;
+    @try { aug = WCRAppendClownToItems(items); } @catch (NSException *e) { WCRLog("entry UIMenuController setMenuItems exc: %@", e); }
+    %orig(aug);
 }
 %end
 %end
@@ -340,18 +419,13 @@ static void WCRProbeDumpOwn(Class cls, NSString *label, BOOL filterMenu) {
         // 长按菜单（上下文菜单 / UIMenu，适配微信 8.0.71）：hook UIContextMenuConfiguration 工厂，
         // 无论微信把 delegate 放在哪个类都能命中，往 UIMenu 追加「小丑」
         if (NSClassFromString(@"UIContextMenuConfiguration")) %init(WCRMenuCtx);
-        // 探针 0.0.9：只读确认类存在 + 自身方法（不遍历父类、不打 description），挂纯旁路观察 hook
+        // 长按菜单注入 0.1.0：先读真实返回类型（决定能否安全触碰返回值），再挂注入 hook
         if (NSClassFromString(@"BaseMessageCellView")) {
-            WCRLog("=== probe 0.0.9 begin ===");
-            for (NSString *cn in @[@"MMMenuItem", @"MMMultiMenuItem", @"MMMenuController",
-                                   @"MMMenuContentView", @"UIMenuItem", @"UIMenuController"]) {
-                WCRLog("probe class %@ exists=%d", cn, NSClassFromString(cn) ? 1 : 0);
+            WCRProbeSignatures();
+            for (NSString *cn in @[@"MMMenuItem", @"MMMultiMenuItem", @"MMMenuController", @"UIMenuItem"]) {
+                WCRLog("entry class %@ exists=%d", cn, NSClassFromString(cn) ? 1 : 0);
             }
-            WCRProbeDumpOwn(NSClassFromString(@"BaseMessageCellView"), @"BaseMessageCellView", YES);
-            WCRProbeDumpOwn(NSClassFromString(@"MMMenuItem"), @"MMMenuItem", NO);
-            WCRProbeDumpOwn(NSClassFromString(@"MMMenuController"), @"MMMenuController", NO);
-            WCRLog("=== probe 0.0.9 end ===");
-            %init(WCRProbe);
+            %init(WCREntry);
         }
         if (objc_getClass("BaseMsgContentViewController")) %init(WCRReload);
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
