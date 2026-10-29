@@ -200,18 +200,19 @@ static UIMenu *WCRInvokeOrigProvider(id origProvider, id elements) {
 %end
 %end
 
-#pragma mark - 长按菜单注入 0.1.0：在微信原生菜单项数组里追加「小丑」（同类型克隆，安全）
-// 结论（逆向 WCRefine 2.1-8）：
-//   BaseMessageCellView -filteredMenuItems: 返回菜单项数组；-generateOperationMenu 为生成（可能 void）；
-//   MMMenuController / UIMenuController -setMenuItems: 接收最终菜单项数组；菜单项为 UIMenuItem 系。
-// 0.0.8 两处闪退根因：①把 %orig 返回值无条件当 id 解引用（真实可能是 void -> 垃圾指针）；
-// ②硬塞原生 UIMenuItem（现有项可能是 MMMenuItem 子类，微信对其发私有 selector）。
-// 本版对策：运行时读真实返回类型(method_getReturnType)，只有 '@' 才触碰返回值；菜单项用现有项同类克隆，
-// 全程 @try 保护；canPerformAction 不用 Logos %orig，直接调用父类 IMP，规避「仅继承」场景的不确定性。
+#pragma mark - 长按菜单注入 0.2.0：单点、非原地、多级项安全
+// 0.1.0 真机日志结论：
+//   sig filteredMenuItems: ret=@ enc=@24@0:8@16 / generateOperationMenu ret=@ / operationMenuItems ret=@
+//   链路：generateOperationMenu -> filteredMenuItems: -> onShowOperationMenu（MMMenuController setMenuItems: 未调用）
+//   菜单项 proto=MMMenuItem；MMMenuItem / MMMultiMenuItem / MMMenuController 均存在。
+// 0.1.0 两个问题根因：
+//   ① 当数组本身是可变 __NSArrayM 时原地 addObject，改动了微信自己的菜单数组 -> 非文字消息闪退/抖动；
+//   ② 多级菜单容器 MMMultiMenuItem 被当普通项克隆 -> 渲染异常。
+// 0.2.0 铁律：只在 filteredMenuItems: 单点追加；永远新建 NSMutableArray，绝不改原数组；
+//   多级项("Multi")与无法安全克隆的项一律跳过；绝不退回原生 UIMenuItem。
 
 static char gWCRFilteredRet = 0;
 static char gWCRGenRet = 0;
-static char gWCRGenDetailRet = 0;
 static char gWCRImgOpRet = 0;
 static NSString *gWCRFilteredEnc = nil;
 static NSString *gWCRGenEnc = nil;
@@ -234,12 +235,6 @@ static void WCRProbeSignatures(void) {
             gWCRGenRet = b[0];
             gWCRGenEnc = [NSString stringWithUTF8String:method_getTypeEncoding(g)];
         }
-        Method gd = class_getInstanceMethod(c, @selector(generateOperationMenuForRecordDetail));
-        if (gd) {
-            char b[32] = {0};
-            method_getReturnType(gd, b, sizeof(b));
-            gWCRGenDetailRet = b[0];
-        }
     }
     Class ic = NSClassFromString(@"ImageMessageCellView");
     if (ic) {
@@ -256,45 +251,44 @@ static void WCRProbeSignatures(void) {
     WCRLog("sig operationMenuItems ret=%c enc=%@", gWCRImgOpRet ? gWCRImgOpRet : '?', gWCRImgOpEnc ?: @"nil");
 }
 
-// 用现有菜单项的同类克隆构造「小丑」项：先 copy 再改 title/action（保留微信私有字段），失败再退回同类 init
+// 只克隆「普通单级菜单项」；多级容器(MMMultiMenuItem)或无法安全设置 title/action 的一律返回 nil
 static id WCRMakeClownItem(NSArray *existing) {
-    SEL act = @selector(wcr_clownMenuItemTapped:);
-    id proto = existing.count ? existing.firstObject : nil;
-    if (proto) {
-        id clone = nil;
-        @try { if ([proto respondsToSelector:@selector(copy)]) clone = [proto copy]; } @catch (NSException *e) { }
-        if (clone) {
-            @try {
-                [clone setValue:@"小丑" forKey:@"title"];
-                if ([clone respondsToSelector:@selector(setAction:)]) [clone setAction:act];
-                return clone;
-            } @catch (NSException *e) {
-                WCRLog("entry clone kvc failed: %@", e);
-            }
-        }
-        Class cls = [proto class];
-        if ([cls instancesRespondToSelector:@selector(initWithTitle:action:)]) {
-            @try { return [[cls alloc] initWithTitle:@"小丑" action:act]; } @catch (NSException *e) { }
-        }
-    }
-    return [[UIMenuItem alloc] initWithTitle:@"小丑" action:act];
+    if (existing.count == 0) return nil;
+    id proto = existing.firstObject;
+    if (![proto isKindOfClass:[UIMenuItem class]]) return nil;
+    NSString *pcn = NSStringFromClass([proto class]);
+    if (pcn && [pcn rangeOfString:@"Multi"].location != NSNotFound) return nil;
+    id clone = nil;
+    @try { clone = [proto copy]; } @catch (NSException *e) { }
+    if (!clone) return nil;
+    @try {
+        if (![clone respondsToSelector:@selector(setTitle:)] ||
+            ![clone respondsToSelector:@selector(setAction:)]) return nil;
+        [clone setTitle:@"小丑"];
+        [clone setAction:@selector(wcr_clownMenuItemTapped:)];
+    } @catch (NSException *e) { return nil; }
+    return clone;
 }
 
+// 永远新建数组，绝不改动传入的微信内部数组
 static id WCRAppendClownToItems(id items) {
     if (![items isKindOfClass:[NSArray class]]) return items;
     NSArray *a = (NSArray *)items;
+    if (a.count == 0) return items;
     for (id el in a) {
         @try { if ([[el valueForKey:@"title"] isEqualToString:@"小丑"]) return items; } @catch (NSException *e) { }
     }
-    id item = nil;
-    @try { item = WCRMakeClownItem(a); } @catch (NSException *e) { WCRLog("entry make item failed: %@", e); }
-    if (!item) return items;
-    NSMutableArray *m = [a isKindOfClass:[NSMutableArray class]] ? (NSMutableArray *)a : [a mutableCopy];
+    id item = WCRMakeClownItem(a);
+    if (!item) {
+        WCRLog("entry skip append (protoClass=%@)", a.count ? NSStringFromClass([a.firstObject class]) : @"none");
+        return items;
+    }
+    NSMutableArray *m = [NSMutableArray arrayWithCapacity:a.count + 1];
+    [m addObjectsFromArray:a];
     [m addObject:item];
-    WCRLog("entry appended 小丑 (items %lu -> %lu, proto=%@, item=%@)",
+    WCRLog("entry appended 小丑 (%lu -> %lu, proto=%@)",
            (unsigned long)a.count, (unsigned long)m.count,
-           a.count ? NSStringFromClass([a.firstObject class]) : @"none",
-           NSStringFromClass([item class]));
+           NSStringFromClass([a.firstObject class]));
     return m;
 }
 
@@ -311,18 +305,12 @@ static id WCRAppendClownToItems(id items) {
 }
 - (id)generateOperationMenu {
     id r = %orig;
-    @try {
-        WCRLog("entry generateOperationMenu fired ret=%c", gWCRGenRet ? gWCRGenRet : '?');
-        if (gWCRGenRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
-    } @catch (NSException *e) { WCRLog("entry generateOperationMenu exc: %@", e); }
+    @try { WCRLog("entry generateOperationMenu fired ret=%c (passthrough)", gWCRGenRet ? gWCRGenRet : '?'); }
+    @catch (NSException *e) { }
     return r;
 }
 - (id)generateOperationMenuForRecordDetail {
-    id r = %orig;
-    @try {
-        if (gWCRGenDetailRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
-    } @catch (NSException *e) { }
-    return r;
+    return %orig;
 }
 - (id)showOperationMenu {
     id r = %orig;
@@ -367,7 +355,7 @@ static id WCRAppendClownToItems(id items) {
 - (id)operationMenuItems {
     id r = %orig;
     @try {
-        WCRLog("entry operationMenuItems fired ret=%c", gWCRImgOpRet ? gWCRImgOpRet : '?');
+        WCRLog("entry operationMenuItems fired ret=%c (passthrough)", gWCRImgOpRet ? gWCRImgOpRet : '?');
         if (gWCRImgOpRet == '@' && [r isKindOfClass:[NSArray class]]) r = WCRAppendClownToItems(r);
     } @catch (NSException *e) { WCRLog("entry operationMenuItems exc: %@", e); }
     return r;
@@ -376,17 +364,17 @@ static id WCRAppendClownToItems(id items) {
 
 %hook MMMenuController
 - (void)setMenuItems:(id)items {
-    id aug = items;
-    @try { aug = WCRAppendClownToItems(items); } @catch (NSException *e) { WCRLog("entry MMMenuController setMenuItems exc: %@", e); }
-    %orig(aug);
+    (void)items;
+    WCRLog("entry MMMenuController setMenuItems fired (passthrough)");
+    %orig;
 }
 %end
 
 %hook UIMenuController
 - (void)setMenuItems:(id)items {
-    id aug = items;
-    @try { aug = WCRAppendClownToItems(items); } @catch (NSException *e) { WCRLog("entry UIMenuController setMenuItems exc: %@", e); }
-    %orig(aug);
+    (void)items;
+    WCRLog("entry UIMenuController setMenuItems fired (passthrough)");
+    %orig;
 }
 %end
 %end
