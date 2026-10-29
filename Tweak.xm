@@ -88,15 +88,10 @@ static void WCRLogCompatibility(void) {
 %end
 %end
 
-#pragma mark - 长按菜单注入（iOS 13+ 上下文菜单 / UIMenu，适配微信 8.0.71）
-// 微信 8.0.71 用 UIContextMenuInteraction + UIMenu 呈现长按菜单（已逆向 WCRefine 2.1-8 确认：dylib 内
-// UIContextMenuInteraction/UIMenu 高引用、UIMenuController/UIMenuItem 仅旧系统兜底）。老的
-// UIMenuController / filteredMenuItems: / operationMenuItems 在本版本根本不调用，所以之前一直不出现。
-// 最稳的注入点：hook UIContextMenuConfiguration 的类工厂 configurationWithIdentifier:previewProvider:
-// actionProvider: —— 无论微信把长按菜单的 delegate 放在哪个类（Cell / VC / 私有类），只要它用这个类
-// 造配置，我们就能包住 actionProvider，往返回的 UIMenu.children 追加「小丑」UIAction。action 触发时
-// 再用「当前活跃的 UIContextMenuInteraction.view」向上回溯到消息 Cell 取 CMessageWrap。
-// 保留原生菜单不变（只追加一项），且幂等（已存在则跳过）。
+#pragma mark - 长按菜单注入（UIContextMenuConfiguration 路径，8.0.71 实测不走，仅旧版本/其他 App 兼容）
+// ⚠️ 实测结论（微信 8.0.71）：UIContextMenuConfiguration 工厂**从不触发**（日志无 ctx factory called），
+// 本版本长按菜单走微信自制的 MMMenuController + 菜单项数组，注入点在 WCREntry 组。
+// 以下 WCRMenuCtx 仅作为其它微信版本 / 其它 App 的兼容兜底，保留不代表 8.0.71 会命中。
 static id WCRFindCellWrap(UIView *fromView) {
     UIView *v = fromView;
     while (v) {
@@ -251,28 +246,44 @@ static void WCRProbeSignatures(void) {
     WCRLog("sig operationMenuItems ret=%c enc=%@", gWCRImgOpRet ? gWCRImgOpRet : '?', gWCRImgOpEnc ?: @"nil");
 }
 
-// 克隆任意可 copy + setAction 的菜单项（MMMenuItem 不是 UIMenuItem 子类，不能按 UIMenuItem 过滤）
+// 构造「小丑」菜单项：优先克隆微信原生 MMMenuItem（保留私有字段），失败则退回系统 UIMenuItem。
+// ⚠️ 历史坑：0.2.0/0.3.0 用 `respondsToSelector:@selector(setAction:)` 当硬门槛，把 MMMenuItem 全卡掉
+// （MMMenuItem 的 action 是 KVC-only 或类簇 copy 返回不同子类，运行期 respondsToSelector 返回 NO），
+// 导致小丑完全不出现。0.1.0 实测微信 8.0.71 接受 UIMenuItem，故保留 UIMenuItem 兜底——这是关键。
 static id WCRMakeClownItem(NSArray *existing) {
-    if (existing.count == 0) return nil;
-    id proto = existing.firstObject;
-    NSString *pcn = NSStringFromClass([proto class]);
-    if (pcn && [pcn rangeOfString:@"Multi"].location != NSNotFound) return nil;   // 多级容器不克隆
-    id clone = nil;
-    @try { if ([proto respondsToSelector:@selector(copy)]) clone = [proto copy]; } @catch (NSException *e) { }
-    if (!clone) return nil;
-    @try {
-        if (![clone respondsToSelector:@selector(setAction:)]) return nil;
-        if ([clone respondsToSelector:@selector(setTitle:)]) {
-            [clone setTitle:@"小丑"];
-        } else {
-            [clone setValue:@"小丑" forKey:@"title"];
+    SEL act = @selector(wcr_clownMenuItemTapped:);
+    id proto = existing.count ? existing.firstObject : nil;
+    if (proto) {
+        NSString *pcn = NSStringFromClass([proto class]);
+        // 多级菜单容器（MMMultiMenuItem 等）：不在克隆层处理，直接退回 UIMenuItem（更安全）
+        if (pcn && [pcn rangeOfString:@"Multi"].location != NSNotFound) {
+            return [[UIMenuItem alloc] initWithTitle:@"小丑" action:act];
         }
-        [clone setAction:@selector(wcr_clownMenuItemTapped:)];
-    } @catch (NSException *e) { return nil; }
-    return clone;
+        id clone = nil;
+        @try { if ([proto respondsToSelector:@selector(copy)]) clone = [proto copy]; } @catch (NSException *e) { }
+        if (clone) {
+            @try {
+                if ([clone respondsToSelector:@selector(setTitle:)]) [clone setTitle:@"小丑"];
+                else @try { [clone setValue:@"小丑" forKey:@"title"]; } @catch (NSException *e) { }
+                if ([clone respondsToSelector:@selector(setAction:)]) {
+                    [clone setAction:act];
+                    return clone;
+                }
+                // 不响应 setAction: 也不强求，克隆层放弃，落到下方 UIMenuItem 兜底
+            } @catch (NSException *e) {
+                WCRLog("entry clone kvc failed: %@", e);
+            }
+        }
+        // 克隆失败 -> 同类型 initWithTitle:action:
+        Class cls = [proto class];
+        if ([cls instancesRespondToSelector:@selector(initWithTitle:action:)]) {
+            @try { return [[cls alloc] initWithTitle:@"小丑" action:act]; } @catch (NSException *e) { }
+        }
+    }
+    return [[UIMenuItem alloc] initWithTitle:@"小丑" action:act];
 }
 
-// 永远新建数组，绝不改动传入的微信内部数组
+// 永远新建数组，绝不改动传入的微信内部数组；幂等：已含「小丑」则原样返回
 static id WCRAppendClownToItems(id items) {
     if (![items isKindOfClass:[NSArray class]]) return items;
     NSArray *a = (NSArray *)items;
@@ -280,7 +291,8 @@ static id WCRAppendClownToItems(id items) {
     for (id el in a) {
         @try { if ([[el valueForKey:@"title"] isEqualToString:@"小丑"]) return items; } @catch (NSException *e) { }
     }
-    id item = WCRMakeClownItem(a);
+    id item = nil;
+    @try { item = WCRMakeClownItem(a); } @catch (NSException *e) { WCRLog("entry make item failed: %@", e); }
     if (!item) {
         WCRLog("entry skip append (protoClass=%@)", a.count ? NSStringFromClass([a.firstObject class]) : @"none");
         return items;
@@ -288,9 +300,10 @@ static id WCRAppendClownToItems(id items) {
     NSMutableArray *m = [NSMutableArray arrayWithCapacity:a.count + 1];
     [m addObjectsFromArray:a];
     [m addObject:item];
-    WCRLog("entry appended 小丑 (%lu -> %lu, proto=%@)",
+    WCRLog("entry appended 小丑 (%lu -> %lu, proto=%@, item=%@)",
            (unsigned long)a.count, (unsigned long)m.count,
-           NSStringFromClass([a.firstObject class]));
+           a.count ? NSStringFromClass([a.firstObject class]) : @"none",
+           NSStringFromClass([item class]));
     return m;
 }
 
@@ -393,17 +406,23 @@ static UIViewController *WCRPresenterVC(void) {
 
 %hook MMMenuController
 - (void)setMenuItems:(id)items {
-    (void)items;
-    WCRLog("entry MMMenuController setMenuItems (passthrough)");
-    %orig;
+    id aug = items;
+    @try {
+        WCRLog("entry MMMenuController setMenuItems fired (sink)");
+        if ([items isKindOfClass:[NSArray class]]) aug = WCRAppendClownToItems(items);
+    } @catch (NSException *e) { WCRLog("entry MMMenuController setMenuItems exc: %@", e); }
+    %orig(aug);
 }
 %end
 
 %hook UIMenuController
 - (void)setMenuItems:(id)items {
-    (void)items;
-    WCRLog("entry UIMenuController setMenuItems (passthrough)");
-    %orig;
+    id aug = items;
+    @try {
+        WCRLog("entry UIMenuController setMenuItems fired (sink)");
+        if ([items isKindOfClass:[NSArray class]]) aug = WCRAppendClownToItems(items);
+    } @catch (NSException *e) { WCRLog("entry UIMenuController setMenuItems exc: %@", e); }
+    %orig(aug);
 }
 %end
 %end
@@ -433,8 +452,9 @@ static UIViewController *WCRPresenterVC(void) {
         // 悬浮入口：纯 UIKit overlay，不依赖微信任何私有类，也不会往微信数据结构注入对象
         [WCRClownEntry installIfNeeded];
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
-        // 长按菜单（上下文菜单 / UIMenu，适配微信 8.0.71）：hook UIContextMenuConfiguration 工厂，
-        // 无论微信把 delegate 放在哪个类都能命中，往 UIMenu 追加「小丑」
+        // 长按菜单：WCRMenuCtx(UIContextMenuConfiguration) 是旧系统兜底，8.0.71 实测不走这条（工厂从不触发）；
+        // 真正的注入在 WCREntry 组（MMMenuController / filteredMenuItems: / operationMenuItems）。保留 WCRMenuCtx
+        // 仅作其他微信版本的兼容，不影响 8.0.71。
         if (NSClassFromString(@"UIContextMenuConfiguration")) %init(WCRMenuCtx);
         // 长按菜单注入 0.1.0：先读真实返回类型（决定能否安全触碰返回值），再挂注入 hook
         if (NSClassFromString(@"BaseMessageCellView")) {
