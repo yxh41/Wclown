@@ -1,6 +1,8 @@
 #import "WCRClownPanel.h"
 #import "WCRClownConfig.h"
 #import "WCRClownEntry.h"
+#import "WCRClownLog.h"
+#import "WCRClownLogView.h"
 #import <objc/runtime.h>
 
 static NSString *const kWCRClownToggleCellID = @"WCRClownToggleCell";
@@ -43,7 +45,8 @@ static char kWCRClownSwitchKeyChar;
             @{@"t": @"退出保持",     @"k": @"transferPersistOnExitChat", @"d": @"退出会话后仍保留转账修改"}
         ],
         @[
-            @{@"t": @"启用诊断 Hook", @"k": @"diagnosticHooksEnabled", @"d": @"下次启动微信后生效"}
+            @{@"t": @"启用诊断 Hook", @"k": @"diagnosticHooksEnabled", @"d": @"下次启动微信后生效"},
+            @{@"t": @"诊断日志", @"action": @"log", @"d": @"在手机上直接查看本机诊断输出（无需电脑）"}
         ],
         @[
             @{@"t": @"悬浮入口",     @"k": @"floatingEntryEnabled", @"d": @"显示可拖动的悬浮按钮，点击打开本面板"},
@@ -58,7 +61,7 @@ static char kWCRClownSwitchKeyChar;
     }
     self.footers = @[
         @"所有修改仅影响本机显示，不改动服务器数据；返回会话后重新渲染即可看到效果。",
-        [@"诊断 Hook 会在下次启动微信时打印候选类/selector 存在性（idevicesyslog 可见）。\n当前构建: " stringByAppendingString:build],
+        [@"诊断 Hook 会在下次启动微信时打印候选类/selector 存在性。点上方「诊断日志」即可在手机上直接查看（无需电脑）。\n当前构建: " stringByAppendingString:build],
         @"悬浮入口是打开本面板的安全方式（不触碰微信内部数据）。长按菜单入口仅供排查用，开启后若微信闪退请立即关掉。"
     ];
 }
@@ -109,15 +112,33 @@ static char kWCRClownSwitchKeyChar;
     cell.textLabel.text = item[@"t"];
     cell.detailTextLabel.text = item[@"d"];
     cell.detailTextLabel.numberOfLines = 0;
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
 
     NSString *key = item[@"k"];
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-    sw.on = [[[WCRClownConfig shared] valueForKey:key] boolValue];
-    objc_setAssociatedObject(sw, &kWCRClownSwitchKeyChar, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    [sw addTarget:self action:@selector(wcr_switchChanged:) forControlEvents:UIControlEventValueChanged];
-    cell.accessoryView = sw;
+    NSString *action = item[@"action"];
+    if (action.length) {
+        // 行为型行（如「诊断日志」）：可点击跳转，不加开关
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    } else {
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+        sw.on = [[[WCRClownConfig shared] valueForKey:key] boolValue];
+        objc_setAssociatedObject(sw, &kWCRClownSwitchKeyChar, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [sw addTarget:self action:@selector(wcr_switchChanged:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+    }
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary<NSString *, NSString *> *item = self.sections[indexPath.section][indexPath.row];
+    if ([item[@"action"] isEqualToString:@"log"]) {
+        WCRClownLogViewController *vc = [WCRClownLogViewController new];
+        [self.navigationController pushViewController:vc animated:YES];
+    }
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
 }
 
 @end

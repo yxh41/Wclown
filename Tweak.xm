@@ -6,12 +6,12 @@
 #import "WCRClownEntryInstaller.h"
 #import "WCRClownPanel.h"
 #import "WCRClownEntry.h"
+#import "WCRClownLog.h"
 
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
 __attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.0.2-diag";
-#define WCRLog(fmt, ...) NSLog(@"[WCRClown] " fmt, ##__VA_ARGS__)
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
 static id WCRCellWrap(id cell, id vm) {

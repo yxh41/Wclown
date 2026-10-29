@@ -1,6 +1,7 @@
 #import "WCRClownEntry.h"
 #import "WCRClownConfig.h"
 #import "WCRClownPanel.h"
+#import "WCRClownLog.h"
 
 static UIWindow *gEntryWindow = nil;
 // App 主窗口的弱引用：必须在创建自己的 overlay 之前捕获。
@@ -36,9 +37,9 @@ static CGPoint gEntryOrigin = {0, 0};
             if (gEntryWindow) { gEntryWindow.hidden = NO; return; }
             @try {
                 [self wcr_buildWindow];
-                NSLog(@"[WCRClown] floating entry ready: %@", gEntryWindow ? @"yes" : @"no scene");
+                WCRAppendLog([NSString stringWithFormat:@"[WCRClown] floating entry ready: %@", gEntryWindow ? @"yes" : @"no scene"]);
             } @catch (NSException *e) {
-                NSLog(@"[WCRClown] entry install failed: %@", e);
+                WCRAppendLog([NSString stringWithFormat:@"[WCRClown] entry install failed: %@", e]);
             }
         }];
     });
@@ -55,7 +56,7 @@ static CGPoint gEntryOrigin = {0, 0};
                 gEntryWindow.hidden = !visible;
             }
         } @catch (NSException *e) {
-            NSLog(@"[WCRClown] entry visibility failed: %@", e);
+            WCRAppendLog([NSString stringWithFormat:@"[WCRClown] entry visibility failed: %@", e]);
         }
     });
 }
@@ -118,9 +119,9 @@ static CGPoint gEntryOrigin = {0, 0};
 
 + (void)wcr_entryTapped {
     UIViewController *presenter = [self wcr_hostPresenter];
-    NSLog(@"[WCRClown] entry tapped presenter=%@", presenter ?: @"(nil)");
+    WCRAppendLog([NSString stringWithFormat:@"[WCRClown] entry tapped presenter=%@", presenter ?: @"(nil)"]);
     if (presenter.view.window == gEntryWindow) {
-        NSLog(@"[WCRClown] ERROR: presenter resolved to overlay window, abort");
+        WCRAppendLog(@"[WCRClown] ERROR: presenter resolved to overlay window, abort");
         return;
     }
     [WCRClownPanelController presentFrom:presenter];
