@@ -12,7 +12,7 @@
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
-__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.0.3-menufix";
+__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.0.4-ctxmenu";
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
 static id WCRCellWrap(id cell, id vm) {
@@ -87,127 +87,100 @@ static void WCRLogCompatibility(void) {
 %end
 %end
 
-#pragma mark - 长按菜单加入「小丑」条目
-// 真正的注入点：微信长按消息时调用 Cell 的菜单数组构造方法（filteredMenuItems: / operationMenuItems），
-// 把 UIMenuItem 混入返回数组即可随原生菜单一起出现。全局 [UIMenuController menuItems] 注册会被微信
-// 显示前重置覆盖（实测无效），必须在此处注入。
-// 安全护栏：仅当数组为空或元素均为 UIMenuItem 时才混入，避免把 UIMenuItem 塞进微信自有菜单项类导致
-// unrecognized selector 闪退（这是早期版本 menuEntryEnabled 默认关闭的原因）。
-static NSArray *WCRAppendClownMenuItem(NSArray *orig) {
-    NSMutableArray *items = [NSMutableArray arrayWithArray:orig ?: @[]];
-    BOOL safe = (items.count == 0);
-    if (!safe) {
-        safe = YES;
-        for (id it in items) { if (![it isKindOfClass:[UIMenuItem class]]) { safe = NO; break; } }
+#pragma mark - 长按菜单注入（iOS 13+ 上下文菜单 / UIMenu，适配微信 8.0.71）
+// 微信 8.0.71 用 UIContextMenuInteraction + UIMenu 呈现长按菜单（已逆向 WCRefine 2.1-8 确认：dylib 内
+// UIContextMenuInteraction/UIMenu 高引用、UIMenuController/UIMenuItem 仅旧系统兜底）。老的
+// UIMenuController / filteredMenuItems: / operationMenuItems 在本版本根本不调用，所以之前一直不出现。
+// 最稳的注入点：hook UIContextMenuConfiguration 的类工厂 configurationWithIdentifier:previewProvider:
+// actionProvider: —— 无论微信把长按菜单的 delegate 放在哪个类（Cell / VC / 私有类），只要它用这个类
+// 造配置，我们就能包住 actionProvider，往返回的 UIMenu.children 追加「小丑」UIAction。action 触发时
+// 再用「当前活跃的 UIContextMenuInteraction.view」向上回溯到消息 Cell 取 CMessageWrap。
+// 保留原生菜单不变（只追加一项），且幂等（已存在则跳过）。
+static id WCRFindCellWrap(UIView *fromView) {
+    UIView *v = fromView;
+    while (v) {
+        if ([v respondsToSelector:NSSelectorFromString(@"messageWrap")] ||
+            [v respondsToSelector:NSSelectorFromString(@"viewModel")]) {
+            return WCRCellWrap(v, nil);
+        }
+        v = v.superview;
     }
-    if (!safe) { WCRLog("menu array element not UIMenuItem, skip inject (cnt=%lu)", (unsigned long)items.count); return orig; }
+    return nil;
+}
+
+// 找到当前正在显示的上下文菜单所依附的 view（即被长按的 Cell 或其内容视图）
+static UIView *WCRActiveContextMenuView(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            for (id inter in w.interactions) {
+                if ([inter isKindOfClass:[UIContextMenuInteraction class]]) {
+                    UIView *v = [inter view];
+                    if (v) return v;
+                }
+            }
+        }
+    }
+    return nil;
+}
+
+// 把「小丑」UIAction 追加进微信原生长按菜单（幂等：已存在则跳过）
+static UIMenu *WCRMenuAppendClown(UIMenu *origMenu) {
+    NSMutableArray *kids = [NSMutableArray arrayWithArray:origMenu.children ?: @[]];
     BOOL has = NO;
-    for (UIMenuItem *it in items) { if ([[it title] isEqualToString:@"小丑"]) { has = YES; break; } }
+    for (id el in kids) {
+        if ([el isKindOfClass:[UIAction class]] && [[el title] isEqualToString:@"小丑"]) { has = YES; break; }
+    }
     if (!has) {
-        UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
-        [items addObject:item];
+        UIAction *clown = [UIAction actionWithTitle:@"小丑" image:nil identifier:@"wcr.clown"
+            handler:^(__kindof UIAction *action) {
+                UIView *cv = WCRActiveContextMenuView();
+                id wrap = cv ? WCRFindCellWrap(cv) : nil;
+                NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+                WCRLog("ctx action tapped key=%@ cv=%@", key, cv ? NSStringFromClass(object_getClass(cv)) : @"nil");
+                if (key.length) {
+                    UIViewController *top = WCRTopController();
+                    if (top) {
+                        WCRClownEditorViewController *ed =
+                            [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
+                        UINavigationController *nav =
+                            [[UINavigationController alloc] initWithRootViewController:ed];
+                        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+                        [top presentViewController:nav animated:YES completion:nil];
+                    }
+                }
+            }];
+        [kids addObject:clown];
     }
-    return items;
+    return [UIMenu menuWithTitle:origMenu.title ?: @"" children:kids];
 }
 
-// 记录当前长按的 Cell，作为兜底：若 action 落到聊天 VC 而非 Cell，也能据此定位消息
-static __weak id gWCRClownPendingCell = nil;
-
-#pragma mark Cell 级：canPerformAction 门控 + 菜单数组注入 + action
-%group WCRMenuCells
-%hook BaseMessageCellView
-- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
-    if (action == @selector(wcr_clownMenuTapped:) && [WCRClownConfig shared].menuEntryEnabled) {
-        return YES;
-    }
-    return %orig;
-}
-
-%new
-- (void)wcr_clownMenuTapped:(id)sender {
-    @try {
-        gWCRClownPendingCell = self;
-        id wrap = WCRCellWrap(self, nil);
-        NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
-        WCRLog("cell menu tapped key=%@", key);
-        if (key.length) {
-            UIViewController *top = WCRTopController();
-            if (top) {
-                WCRClownEditorViewController *ed =
-                    [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
-                UINavigationController *nav =
-                    [[UINavigationController alloc] initWithRootViewController:ed];
-                nav.modalPresentationStyle = UIModalPresentationPageSheet;
-                [top presentViewController:nav animated:YES completion:nil];
-            }
+// 包住微信返回的 UIContextMenuConfiguration：复用 identifier/previewProvider，替换 actionProvider
+// 使其返回的 UIMenu 带上「小丑」UIAction。origProvider 可能在异常环境调用，做保护。
+static UIContextMenuConfiguration *WCRWrapClownConfig(UIContextMenuConfiguration *orig) {
+    if (!orig) return nil;
+    id origProvider = orig.actionProvider;
+    return [UIContextMenuConfiguration configurationWithIdentifier:orig.identifier
+                                                  previewProvider:orig.previewProvider
+                                                   actionProvider:^UIMenu *(UIContextMenuConfiguration *cfg) {
+        UIMenu *origMenu = nil;
+        if (origProvider) {
+            UIMenu *(^prov)(UIContextMenuConfiguration *) = origProvider;
+            @try { origMenu = prov(cfg); } @catch (NSException *e) { WCRLog("ctx provider exc: %@", e); }
         }
-    } @catch (NSException *e) {
-        WCRLog("cell menu tap exception: %@", e);
-    }
+        return WCRMenuAppendClown(origMenu);
+    }];
 }
-%end
-%end
 
-#pragma mark 注入点 A：BaseMessageCellView -filteredMenuItems:（文字/通用 Cell）
-%group WCRMenuFiltered
-%hook BaseMessageCellView
-- (NSArray *)filteredMenuItems:(id)arg {
-    NSArray *orig = %orig(arg);
-    if ([WCRClownConfig shared].menuEntryEnabled) {
-        gWCRClownPendingCell = self;
-        WCRLog("filteredMenuItems fired cls=%@ cnt=%lu", NSStringFromClass(object_getClass(self)), (unsigned long)(orig.count));
-        return WCRAppendClownMenuItem(orig);
+%group WCRMenuCtx
+%hook UIContextMenuConfiguration
++ (UIContextMenuConfiguration *)configurationWithIdentifier:(id)identifier previewProvider:(id)previewProvider actionProvider:(id)actionProvider {
+    UIContextMenuConfiguration *orig = %orig(identifier, previewProvider, actionProvider);
+    if ([WCRClownConfig shared].menuEntryEnabled && orig && orig.actionProvider) {
+        WCRLog("ctxConfig factory fired id=%@", identifier);
+        return WCRWrapClownConfig(orig);
     }
     return orig;
-}
-%end
-%end
-
-#pragma mark 注入点 B：ImageMessageCellView -operationMenuItems（图片 Cell，部分版本走此路）
-%group WCRMenuOperation
-%hook ImageMessageCellView
-- (NSArray *)operationMenuItems {
-    NSArray *orig = %orig;
-    if ([WCRClownConfig shared].menuEntryEnabled) {
-        gWCRClownPendingCell = self;
-        WCRLog("operationMenuItems fired cls=%@ cnt=%lu", NSStringFromClass(object_getClass(self)), (unsigned long)(orig.count));
-        return WCRAppendClownMenuItem(orig);
-    }
-    return orig;
-}
-%end
-%end
-
-#pragma mark 兜底：action 可能落在聊天 VC 而非 Cell（responder chain）
-%group WCRMenuVC
-%hook BaseMsgContentViewController
-- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
-    if (action == @selector(wcr_clownMenuTapped:) && [WCRClownConfig shared].menuEntryEnabled) return YES;
-    return %orig;
-}
-
-%new
-- (void)wcr_clownMenuTapped:(id)sender {
-    @try {
-        id cell = gWCRClownPendingCell;
-        id wrap = cell ? WCRCellWrap(cell, nil) : nil;
-        if (!wrap && cell) wrap = WCRSafeCall0(cell, NSSelectorFromString(@"messageWrap"));
-        NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
-        WCRLog("vc menu tapped key=%@", key);
-        if (key.length) {
-            UIViewController *top = WCRTopController();
-            if (top) {
-                WCRClownEditorViewController *ed =
-                    [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
-                UINavigationController *nav =
-                    [[UINavigationController alloc] initWithRootViewController:ed];
-                nav.modalPresentationStyle = UIModalPresentationPageSheet;
-                [top presentViewController:nav animated:YES completion:nil];
-            }
-        }
-    } @catch (NSException *e) {
-        WCRLog("vc menu tap exception: %@", e);
-    }
 }
 %end
 %end
@@ -237,14 +210,9 @@ static __weak id gWCRClownPendingCell = nil;
         // 悬浮入口：纯 UIKit overlay，不依赖微信任何私有类，也不会往微信数据结构注入对象
         [WCRClownEntry installIfNeeded];
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
-        // 长按菜单：canPerformAction 门控 + action 始终挂在 Cell 上（安全，canPerformAction 存在于 UIResponder）
-        if (NSClassFromString(@"BaseMessageCellView")) %init(WCRMenuCells);
-        // 注入点 A：仅当微信本版本确有 filteredMenuItems: 才挂（不存在则跳过，避免 hook 空方法）
-        if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"filteredMenuItems:")) %init(WCRMenuFiltered);
-        // 注入点 B：图片 Cell 专用菜单数组（部分版本走此路）
-        if (WCRClassAndSelectorAvailable(@"ImageMessageCellView", @"operationMenuItems")) %init(WCRMenuOperation);
-        // 兜底 responder
-        if (objc_getClass("BaseMsgContentViewController")) %init(WCRMenuVC);
+        // 长按菜单（上下文菜单 / UIMenu，适配微信 8.0.71）：hook UIContextMenuConfiguration 工厂，
+        // 无论微信把 delegate 放在哪个类都能命中，往 UIMenu 追加「小丑」
+        if (NSClassFromString(@"UIContextMenuConfiguration")) %init(WCRMenuCtx);
         if (objc_getClass("BaseMsgContentViewController")) %init(WCRReload);
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
             [[WCRClownStore shared] clearAll];
