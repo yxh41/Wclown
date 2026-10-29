@@ -110,14 +110,18 @@
     } else {
         WCRLog("editor saved key=%@ but host nil (no reload)", self.msgKey);
     }
-    // 主动扫描刷新：0.4.3 真机证明 setViewModel:/layoutContentView 这些 hook 在保存后并未被走到，
-    // 不能等微信自己重渲染。保存后立刻扫 + 延迟再扫一次（等 reloadData / 异步布局完成）。
+    // 0.4.4 闪退复盘：在保存按钮调用栈里同步遍历视图树 + forceDisplayInSync（同步绘制），
+    // 命中离屏/未布局的复用 Cell 直接 SIGABRT。改为 dismiss 完成后再异步到下一个 runloop 扫，
+    // 彻底避开当前调用栈与布局/绘制中途。savedKey 为局部强引用，block 不捕获 self。
     NSString *savedKey = self.msgKey;
-    WCRForceRefreshVisibleTextCellsForKey(savedKey);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        WCRForceRefreshVisibleTextCellsForKey(savedKey);
-    });
-    [self dismissViewControllerAnimated:YES completion:nil];
+    [self dismissViewControllerAnimated:YES completion:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            WCRForceRefreshVisibleTextCellsForKey(savedKey);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                WCRForceRefreshVisibleTextCellsForKey(savedKey);
+            });
+        });
+    }];
 }
 
 @end

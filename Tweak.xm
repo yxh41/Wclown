@@ -23,7 +23,7 @@
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
-__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.4-recover";
+__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.5-recover";
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
 static id WCRCellWrap(id cell, id vm) {
@@ -141,8 +141,9 @@ static BOOL WCRApplyTextToCell(id cell, const char *where) {
         }
         id prev = objc_getAssociatedObject(rtv, kWCRVMOverrideKey);
         if ([prev isEqual:replacement]) return NO;
+        // 0.4.5：与主动扫描保持一致，去掉 forceDisplayInSync（同步绘制会崩）。只 setContent:，
+        // 让微信自己的异步绘制/布局流程接管，避免任何时机下的 SIGABRT。
         WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
-        WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
         objc_setAssociatedObject(rtv, kWCRVMOverrideKey, replacement, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         WCRLog("apply[%s]: richText refreshed len=%lu", where, (unsigned long)replacement.length);
         return YES;
@@ -243,58 +244,71 @@ static void WCRBindOverrideToVM(id vm, id cell) {
 // setViewModel: / layoutContentView 在真机上并未被走到（首屏渲染发生在 tweak 注入之前）。
 // 与其等它触发，不如编辑保存后主动扫一遍屏幕上的文本 Cell，按 key 命中后直接改 RichTextView。
 // 日志报 windows / textCells / matched / written，任一环节断了都能一眼定位。
+// 0.4.4 真机：编辑保存即闪退。根因是同步遍历所有 scene/window 的整棵视图树，把离屏/未布局的
+// 复用 Cell 也扫进去，再对它们的 RichTextView 调 forceDisplayInSync（同步绘制）→ SIGABRT。
+// 0.4.5 收窄：只扫前台 keyWindow 一条路径；只处理 window 非 nil、非 hidden、frame 非空且真正
+// 与屏幕相交的可见 Cell；不再调 forceDisplayInSync（只 setContent:，让微信自己的绘制流程接管）。
+// 并在关键步骤前后各打一条日志，即使崩溃也能定位到崩在哪一步。
 static void WCRCollectTextCells(UIView *v, Class tm, NSMutableArray *out, int depth) {
-    if (!v || depth > 40) return;
+    if (!v || depth > 30) return;
     if ([v isKindOfClass:tm]) { [out addObject:v]; return; }
     for (UIView *sub in v.subviews) WCRCollectTextCells(sub, tm, out, depth + 1);
 }
 
 __attribute__((visibility("default")))
 void WCRForceRefreshVisibleTextCellsForKey(NSString *targetKey) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ WCRForceRefreshVisibleTextCellsForKey(targetKey); });
+        return;
+    }
+    WCRLog("forceScan: enter key=%@", targetKey);
     @try {
         Class tm = NSClassFromString(@"TextMessageCellView");
         if (!tm) { WCRLog("forceScan: TextMessageCellView class MISSING"); return; }
-        NSMutableArray *cells = [NSMutableArray array];
-        NSInteger windows = 0;
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if (w.hidden) continue;
-                windows++;
-                WCRCollectTextCells(w, tm, cells, 0);
-            }
+        UIWindow *win = nil;
+        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            if (((UIWindowScene *)sc).activationState != UISceneActivationStateForegroundActive) continue;
+            win = ((UIWindowScene *)sc).keyWindow;
+            if (win) break;
         }
-        WCRLog("forceScan: windows=%ld textCells=%lu targetKey=%@", (long)windows, (unsigned long)cells.count, targetKey);
+        if (!win) { WCRLog("forceScan: no foreground keyWindow"); return; }
+        NSMutableArray *cells = [NSMutableArray array];
+        WCRCollectTextCells(win, tm, cells, 0);
+        WCRLog("forceScan: keyWindow=%@ textCells=%lu", NSStringFromClass(object_getClass(win)), (unsigned long)cells.count);
         if (!cells.count) return;
         NSString *replacement = WCROverrideTextForKey(targetKey);
         if (!replacement) { WCRLog("forceScan: NO override in store for targetKey"); return; }
-        NSInteger matched = 0, written = 0;
-        for (id cell in cells) {
+        NSInteger visible = 0, matched = 0, written = 0;
+        for (id raw in cells) {
+            UIView *cell = (UIView *)raw;
+            if (!cell.window || cell.hidden || CGRectIsEmpty(cell.frame)) continue;
+            CGRect r = [cell convertRect:cell.bounds toView:win];
+            if (!CGRectIntersectsRect(r, win.bounds)) continue;
+            visible++;
             id wrap = WCRCellWrap(cell, nil);
             NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
             if (![key isEqualToString:targetKey]) continue;
             matched++;
             id rtv = WCRSafeCall0(cell, NSSelectorFromString(@"getRichTextView"));
-            if (!rtv) { WCRLog("forceScan: matched but richTextView nil"); continue; }
+            if (!rtv) { WCRLog("forceScan: matched cell richTextView nil"); continue; }
+            WCRLog("forceScan: before setContent key=%@", key);
             WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
-            WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
-            WCRBindOverrideToVM(WCRSafeCall0(cell, NSSelectorFromString(@"viewModel")), cell);
             written++;
+            WCRLog("forceScan: after setContent written=%ld", (long)written);
         }
-        WCRLog("forceScan: matched=%ld written=%ld len=%lu", (long)matched, (long)written, (unsigned long)replacement.length);
+        WCRLog("forceScan: visible=%ld matched=%ld written=%ld len=%lu",
+               (long)visible, (long)matched, (long)written, (unsigned long)replacement.length);
         if (!matched) {
-            // 打样本：直接对比「扫描算出的 key」与「保存时的 targetKey」差在哪
             NSInteger shown = 0;
-            for (id cell in cells) {
+            for (id raw in cells) {
                 if (shown >= 4) break;
+                UIView *cell = (UIView *)raw;
                 id wrap = WCRCellWrap(cell, nil);
                 NSString *k = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : @"(no wrap)";
-                id rtv = WCRSafeCall0(cell, NSSelectorFromString(@"getRichTextView"));
-                id cur = rtv ? WCRSafeCall0(rtv, NSSelectorFromString(@"getContent")) : nil;
-                NSString *desc = [cur description] ?: @"(nil)";
-                if (desc.length > 30) desc = [[desc substringToIndex:30] stringByAppendingString:@"..."];
-                WCRLog("forceScan: sample key=%@ curType=%@ cur=%@ cellClass=%@",
-                       k, NSStringFromClass(object_getClass(cur)), desc, NSStringFromClass(object_getClass(cell)));
+                WCRLog("forceScan: sample key=%@ onScreen=%d frame=%@", k,
+                       (cell.window && !cell.hidden && !CGRectIsEmpty(cell.frame)) ? 1 : 0,
+                       NSStringFromCGRect(cell.frame));
                 shown++;
             }
         }
@@ -757,8 +771,15 @@ static UIViewController *WCRFrontChatVC(void) {
 - (void)wcr_reloadChat {
     @try {
         id tv = WCRSafeCall0(self, NSSelectorFromString(@"tableView"));
+        WCRLog("reloadChat: self=%@ tableView=%@", NSStringFromClass(object_getClass(self)),
+               tv ? NSStringFromClass(object_getClass(tv)) : @"nil");
         if (!tv) tv = WCRSafeCall0(self, NSSelectorFromString(@"m_tableView"));
-        if (tv) WCRSafeCall0(tv, NSSelectorFromString(@"reloadData"));
+        if (tv) {
+            WCRLog("reloadChat: reloadData -> %@", NSStringFromClass(object_getClass(tv)));
+            WCRSafeCall0(tv, NSSelectorFromString(@"reloadData"));
+        } else {
+            WCRLog("reloadChat: NO tableView/m_tableView found, reload SKIPPED");
+        }
     } @catch (NSException *e) {
         WCRLog("reload exception: %@", e);
     }
