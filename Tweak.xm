@@ -371,8 +371,11 @@ static id WCRMakeClownItem(NSArray *existing, NSString *payloadKey) {
                 if (item) {
                     if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
                         [item setAccessibilityLabel:@"wcr.clown"];
+                    // 用 WCRSafeCall1 而不是 performSelector:withObject:：
+                    // ARC 下 performSelector 的返回值未知，会触发 -Warc-performSelector-leaks，
+                    // 而本工程带 -Werror，一条告警就整包编不过。
                     if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)])
-                        (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+                        WCRSafeCall1(item, NSSelectorFromString(@"setUserInfo:"), payloadKey);
                     WCRLog("entry clown item WITH icon (ctor)");
                     return item;
                 }
@@ -388,7 +391,7 @@ static id WCRMakeClownItem(NSArray *existing, NSString *payloadKey) {
                     if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
                         [item setAccessibilityLabel:@"wcr.clown"];
                     if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)])
-                        (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+                        WCRSafeCall1(item, NSSelectorFromString(@"setUserInfo:"), payloadKey);
                     WCRLog("entry clown item icon via setter=%d", hasIconSetter ? 1 : 0);
                     return item;
                 }
