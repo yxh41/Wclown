@@ -155,7 +155,7 @@ static __weak id gWCRClownPendingCell = nil;
     NSArray *orig = %orig(arg);
     if ([WCRClownConfig shared].menuEntryEnabled) {
         gWCRClownPendingCell = self;
-        WCRLog("filteredMenuItems fired cls=%@ cnt=%lu", NSStringFromClass([self class]), (unsigned long)(orig.count));
+        WCRLog("filteredMenuItems fired cls=%@ cnt=%lu", NSStringFromClass(object_getClass(self)), (unsigned long)(orig.count));
         return WCRAppendClownMenuItem(orig);
     }
     return orig;
@@ -170,7 +170,7 @@ static __weak id gWCRClownPendingCell = nil;
     NSArray *orig = %orig;
     if ([WCRClownConfig shared].menuEntryEnabled) {
         gWCRClownPendingCell = self;
-        WCRLog("operationMenuItems fired cls=%@ cnt=%lu", NSStringFromClass([self class]), (unsigned long)(orig.count));
+        WCRLog("operationMenuItems fired cls=%@ cnt=%lu", NSStringFromClass(object_getClass(self)), (unsigned long)(orig.count));
         return WCRAppendClownMenuItem(orig);
     }
     return orig;
