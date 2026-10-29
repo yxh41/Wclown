@@ -7,6 +7,7 @@
 #import "WCRClownPanel.h"
 #import "WCRClownEntry.h"
 #import "WCRClownLog.h"
+#import "WCRClownEditor.h"
 
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
@@ -39,27 +40,6 @@ static UIViewController *WCRTopController(void) {
     UIViewController *rc = window.rootViewController;
     while (rc.presentedViewController) rc = rc.presentedViewController;
     return rc;
-}
-
-// 菜单点击 IMP（通过 class_addMethod 注入到 Cell 类）：打开微信内设置面板
-static void WCRClownMenuHandler(id self, SEL _cmd, id sender) {
-    @try {
-        id wrap = WCRCellWrap(self, nil);
-        NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
-        WCRLog("menu tapped key=%@", key);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [WCRClownPanelController presentFrom:WCRTopController()];
-        });
-    } @catch (NSException *e) {
-        WCRLog("menu handler exception: %@", e);
-    }
-}
-
-static void WCRInstallClownMenuSelectorIfNeeded(Class cls) {
-    SEL sel = @selector(wcr_clownMenuTapped:);
-    if (cls && !class_getInstanceMethod(cls, sel)) {
-        class_addMethod(cls, sel, (IMP)WCRClownMenuHandler, "v@:@");
-    }
 }
 
 // 诊断：记录候选类/selector 存在性（不改数据）
@@ -107,33 +87,49 @@ static void WCRLogCompatibility(void) {
 %end
 %end
 
-#pragma mark - 长按菜单注入「小丑」条目（骨架：点击仅做诊断）
-%group WCRMenu
+#pragma mark - 长按消息打开「编辑本条」面板（安全入口：接管 onShowOperationMenu，不注入微信菜单数组）
+%group WCREdit
 %hook BaseMessageCellView
-- (id)filteredMenuItems:(id)arg {
-    id items = %orig;
-    @try {
-        // 仅在用户显式开启时才注入「小丑」。默认关闭：微信的 filteredMenuItems: 返回的很可能是
-        // 微信自有菜单项类而非 UIMenuItem，盲目混入会让微信枚举时调用自身方法 ->
-        // unrecognized selector -> 长按闪退。保持关闭，改用零风险的悬浮入口开面板。
-        if ([WCRClownConfig shared].menuEntryEnabled) {
-            WCRInstallClownMenuSelectorIfNeeded(object_getClass(self));
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
-#pragma clang diagnostic pop
-            if ([items isKindOfClass:NSArray.class]) items = [items arrayByAddingObject:item];
-            else if (items) items = @[items, item];
-            else items = @[item];
+- (void)onShowOperationMenu {
+    WCRClownConfig *cfg = [WCRClownConfig shared];
+    if (cfg.menuEntryEnabled) {
+        @try {
+            id wrap = WCRCellWrap(self, nil);
+            NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+            WCRLog("edit menu fired key=%@", key);
+            if (key.length) {
+                UIViewController *top = WCRTopController();
+                if (top) {
+                    WCRClownEditorViewController *ed =
+                        [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
+                    UINavigationController *nav =
+                        [[UINavigationController alloc] initWithRootViewController:ed];
+                    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+                    [top presentViewController:nav animated:YES completion:nil];
+                    return; // 接管长按：不显示微信原生菜单
+                }
+            }
+        } @catch (NSException *e) {
+            WCRLog("edit menu exception: %@", e);
         }
-    } @catch (NSException *e) {
-        WCRLog("menu exception: %@", e);
     }
-    return items;
+    %orig;
 }
-- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
-    if (action == @selector(wcr_clownMenuTapped:)) return YES;
-    return %orig;
+%end
+%end
+
+#pragma mark - 会话实时刷新（编辑保存后重载列表）
+%group WCRReload
+%hook BaseMsgContentViewController
+%new
+- (void)wcr_reloadChat {
+    @try {
+        id tv = WCRSafeCall0(self, NSSelectorFromString(@"tableView"));
+        if (!tv) tv = WCRSafeCall0(self, NSSelectorFromString(@"m_tableView"));
+        if (tv) WCRSafeCall0(tv, NSSelectorFromString(@"reloadData"));
+    } @catch (NSException *e) {
+        WCRLog("reload exception: %@", e);
+    }
 }
 %end
 %end
@@ -147,7 +143,8 @@ static void WCRLogCompatibility(void) {
         // 悬浮入口：纯 UIKit overlay，不依赖微信任何私有类，也不会往微信数据结构注入对象
         [WCRClownEntry installIfNeeded];
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
-        if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"filteredMenuItems:")) %init(WCRMenu);
+        if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"onShowOperationMenu")) %init(WCREdit);
+        if (objc_getClass("BaseMsgContentViewController")) %init(WCRReload);
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
             [[WCRClownStore shared] clearAll];
         }];

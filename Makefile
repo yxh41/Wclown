@@ -6,7 +6,7 @@ INSTALL_TARGET_PROCESSES = WeChat
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = WCRClownStandalone
-WCRClownStandalone_FILES = Tweak.xm WCRClownConfig.m WCRClownStore.m WCRClownRuntime.m WCRClownEntryInstaller.m WCRClownPanel.m WCRClownEntry.m WCRClownLog.m WCRClownLogView.m
+WCRClownStandalone_FILES = Tweak.xm WCRClownConfig.m WCRClownStore.m WCRClownRuntime.m WCRClownEntryInstaller.m WCRClownPanel.m WCRClownEntry.m WCRClownLog.m WCRClownLogView.m WCRClownEditor.m
 WCRClownStandalone_CFLAGS = -fobjc-arc -Werror -Wno-cast-function-type
 WCRClownStandalone_FRAMEWORKS = UIKit Foundation Photos
 
