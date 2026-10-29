@@ -48,8 +48,13 @@ WCR_BOOL_PROPERTY(yinYangEnabled, setYinYangEnabled)
 WCR_BOOL_PROPERTY(transferAmountEnabled, setTransferAmountEnabled)
 WCR_BOOL_PROPERTY(transferPersistOnExitChat, setTransferPersistOnExitChat)
 WCR_BOOL_PROPERTY(diagnosticHooksEnabled, setDiagnosticHooksEnabled)
-WCR_BOOL_PROPERTY(menuEntryEnabled, setMenuEntryEnabled)
-WCR_BOOL_PROPERTY(floatingEntryEnabled, setFloatingEntryEnabled)
+// 入口开关改为「永远开」，不可被设置开关误关：之前用户把这两个关掉后整个功能看不见、且没处恢复，
+// 反复踩坑。长按菜单入口 + 悬浮入口是功能的「访问方式」，不应可被关到全失联。
+// 若要隐藏悬浮按钮，后续单独加回一个非入口类开关即可。
+- (BOOL)menuEntryEnabled { return YES; }
+- (void)setMenuEntryEnabled:(BOOL)v { /* 永远开，忽略写入 */ }
+- (BOOL)floatingEntryEnabled { return YES; }
+- (void)setFloatingEntryEnabled:(BOOL)v { /* 永远开，忽略写入 */ }
 
 - (void)reset {
     for (NSString *key in @[@"enabled", @"textEnabled", @"imageEnabled", @"messageTimeEnabled",

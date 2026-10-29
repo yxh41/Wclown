@@ -76,21 +76,7 @@
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>入口</string>
-			<key>footerText</key><string>长按菜单入口：在微信长按消息的原生菜单里追加「小丑」。悬浮入口：屏幕角落常驻「丑」按钮，作为备用入口。两者默认开启；老版本若关过会残留为关，请用下方「恢复默认设置」清除。</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSToggleSwitchCell</string>
-			<key>label</key><string>长按菜单入口</string>
-			<key>id</key><string>menuEntryEnabled</string>
-			<key>key</key><string>menuEntryEnabled</string>
-			<key>default</key><true/>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSToggleSwitchCell</string>
-			<key>label</key><string>悬浮入口</string>
-			<key>id</key><string>floatingEntryEnabled</string>
-			<key>key</key><string>floatingEntryEnabled</string>
-			<key>default</key><true/>
+			<key>footerText</key><string>长按菜单入口（微信长按消息原生菜单里追加「小丑」）与悬浮入口（屏幕角落常驻「丑」按钮）已固定为开启，由代码强制，无法关闭，确保随时能进场，不会再出现「开关关掉后全失联」的情况。若日后想隐藏「丑」按钮，再单独加非入口开关即可。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
