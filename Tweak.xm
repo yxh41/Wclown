@@ -23,7 +23,7 @@
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
-__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.0-mmitem";
+__attribute__((visibility("default"))) const char kWCRClownBuildTag[] = "wcrclown-0.4.3-recover";
 
 // 从 Cell 取 CMessageWrap：先试 messageWrap，再试 viewModel.messageWrap，否则把 vm 当 wrap
 static id WCRCellWrap(id cell, id vm) {
@@ -87,39 +87,153 @@ static void WCRLogCompatibility(void) {
     }
 }
 
-#pragma mark - 应用覆盖到文本消息渲染（微信 8.0.71 MVVM：改 wrap 无效，改 RichTextView.content）
-// 根因（diag23 砸壳二进制权威确认）：TextMessageViewModel 在 initWithMessageWrap:contact:chatContact:
-// 构造时就把 wrap.m_nsContent 预排版进 contentText / contentTextStyles 缓存；真正显示文字的是
-// TextMessageCellView.getRichTextView（RichTextView），它读的是 viewModel 缓存值，不读 wrap.m_nsContent。
-// ⇒ 旧版在 setViewModel: 前改 wrap.m_nsContent「太晚」，界面纹丝不动（0.4.1 用户实测「编辑没效果」）。
-// 正确做法：%orig（微信按原数据渲染完、RichTextView 已建好）之后，用 key 查覆盖，
-// 直接对 RichTextView setContent: + forceDisplayInSync（RichTextView 默认异步绘制，必须强制同步）。
+#pragma mark - 应用覆盖到文本消息渲染（微信 8.0.71 MVVM：三层注入）
+// 0.4.2 失败根因（用户 00:13 真机日志「apply: 一行都没有」）：setViewModel: 是
+// TextMessageCellView **自己重写**的方法，不是继承 BaseMessageCellView。0.4.2 只 hook 父类
+// ⇒ 子类走自己的 IMP，hook 完全被绕过。dump 进一步确认 TextMessageViewModel 没有 messageWrap
+// getter（只有 initWithMessageWrap:contact:chatContact:），contentText 只有 getter 没有 setter
+// ⇒ 改 wrap / 改缓存都不可行，只能构造期注入 + 取值器拦截。
+// 三层（任一层生效即可，日志可区分）：
+//   L1 VM 构造 initWithMessageWrap:contact:chatContact: → 把覆盖文本关联到 VM（key 100% 正确）
+//   L2 VM 取值器 contentText → 有覆盖直接返回（微信渲染 + 算高度都走它，最治本）
+//   L3 Cell 层 setViewModel: / layoutContentView → %orig 后强制刷 RichTextView（VM 复用兜底）
+static const void *kWCRVMOverrideKey = &kWCRVMOverrideKey;
+
+static NSString *WCROverrideTextForKey(NSString *key) {
+    if (!key.length) return nil;
+    NSDictionary *entry = [WCRClownStore.shared overridesForKey:key];
+    NSString *text = entry[@"text"];
+    return text.length ? text : nil;
+}
+
+static NSString *WCRCellOverrideText(id cell) {
+    WCRClownConfig *cfg = [WCRClownConfig shared];
+    if (!cfg.enabled || !cfg.textEnabled) return nil;
+    if (!cell || ![(id)cell respondsToSelector:NSSelectorFromString(@"getRichTextView")]) return nil;
+    id wrap = WCRCellWrap(cell, nil);
+    if (!wrap) return nil;
+    return WCROverrideTextForKey([WCRClownStore.shared messageKeyForWrap:wrap session:nil]);
+}
+
+// contentText 会被高频调用（测量/布局/渲染），命中日志按「标签+key」去重，只打一次
+static void WCRLogHitOnce(NSString *tag, NSString *key, NSUInteger len) {
+    static NSMutableSet *seen = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ seen = [NSMutableSet set]; });
+    NSString *mark = [NSString stringWithFormat:@"%@|%@", tag, key ?: @"(nil)"];
+    @synchronized (seen) {
+        if ([seen containsObject:mark]) return;
+        [seen addObject:mark];
+    }
+    WCRLog("apply[%s]: override key=%@ len=%lu", tag.UTF8String, key, (unsigned long)len);
+}
+
+// 防重入：布局 → setContent: → 触发布局 → 再 setContent: 会死循环，用关联对象记住已写入的文本
+static BOOL WCRApplyTextToCell(id cell, const char *where) {
+    @try {
+        NSString *replacement = WCRCellOverrideText(cell);
+        if (!replacement) return NO;
+        id rtv = WCRSafeCall0(cell, NSSelectorFromString(@"getRichTextView"));
+        if (!rtv) {
+            static int nilLogs = 0;
+            if (nilLogs < 3) { nilLogs++; WCRLog("apply[%s]: richTextView nil", where); }
+            return NO;
+        }
+        id prev = objc_getAssociatedObject(rtv, kWCRVMOverrideKey);
+        if ([prev isEqual:replacement]) return NO;
+        WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
+        WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
+        objc_setAssociatedObject(rtv, kWCRVMOverrideKey, replacement, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        WCRLog("apply[%s]: richText refreshed len=%lu", where, (unsigned long)replacement.length);
+        return YES;
+    } @catch (NSException *e) {
+        WCRLog("apply[%s] exception: %@", where, e);
+        return NO;
+    }
+}
+
+// VM 复用而未重建时，由 Cell hook 把覆盖文本重新绑到 VM 上
+static void WCRBindOverrideToVM(id vm, id cell) {
+    if (!vm) return;
+    objc_setAssociatedObject(vm, kWCRVMOverrideKey, WCRCellOverrideText(cell),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 %group WCRApply
+%hook TextMessageViewModel
+- (id)initWithMessageWrap:(id)wrap contact:(id)ct chatContact:(id)cct {
+    id vm = %orig;
+    @try {
+        WCRClownConfig *cfg = [WCRClownConfig shared];
+        if (vm && wrap && cfg.enabled && cfg.textEnabled) {
+            NSString *key = [WCRClownStore.shared messageKeyForWrap:wrap session:nil];
+            NSString *replacement = WCROverrideTextForKey(key);
+            if (replacement) {
+                objc_setAssociatedObject(vm, kWCRVMOverrideKey, replacement, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                WCRLogHitOnce(@"vmInit", key, replacement.length);
+            }
+        }
+    } @catch (NSException *e) { WCRLog("apply[vmInit] exception: %@", e); }
+    return vm;
+}
+- (id)contentText {
+    @try {
+        id ov = objc_getAssociatedObject(self, kWCRVMOverrideKey);
+        if ([ov isKindOfClass:[NSString class]] && [(NSString *)ov length]) {
+            NSString *text = (NSString *)ov;
+            WCRLogHitOnce(@"vmContentText", @"(bound)", text.length);
+            return text;
+        }
+        // 兜底：VM 复用未重建（关联对象为空）时，经 getTextMessageCellView 反查 cell → wrap → key。
+        // dump 确认 VM 有 getTextMessageCellView，cell 有 messageWrap，可自洽算出 key。
+        WCRClownConfig *cfg = [WCRClownConfig shared];
+        if (cfg.enabled && cfg.textEnabled) {
+            id cell = WCRSafeCall0(self, NSSelectorFromString(@"getTextMessageCellView"));
+            NSString *rep = WCRCellOverrideText(cell);
+            if (rep) {
+                objc_setAssociatedObject(self, kWCRVMOverrideKey, rep, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                WCRLogHitOnce(@"vmContentTextFB", @"(cell)", rep.length);
+                return rep;
+            }
+        }
+    } @catch (NSException *e) { WCRLog("apply[vmContentText] exception: %@", e); }
+    return %orig;
+}
+- (id)originContentText {
+    // 双保险：微信部分渲染路径读 originContentText 而非 contentText，两个 getter 一起拦
+    @try {
+        id ov = objc_getAssociatedObject(self, kWCRVMOverrideKey);
+        if ([ov isKindOfClass:[NSString class]] && [(NSString *)ov length]) {
+            WCRLogHitOnce(@"vmOriginContentText", @"(bound)", [(NSString *)ov length]);
+            return ov;
+        }
+    } @catch (NSException *e) { WCRLog("apply[vmOriginContentText] exception: %@", e); }
+    return %orig;
+}
+%end
+
+%hook TextMessageCellView
+- (void)setViewModel:(id)vm {
+    WCRBindOverrideToVM(vm, self);   // %orig 之前绑定：%orig 内部的 contentText 读取即可命中
+    %orig;
+    WCRBindOverrideToVM(vm, self);   // %orig 之后刷新：此时 cell.messageWrap 已更新
+    static int probeA = 0;
+    if (probeA < 2) { probeA++; WCRLog("apply: TMCell setViewModel hook ALIVE (#%d)", probeA); }
+    WCRApplyTextToCell(self, "TMCell.setViewModel");
+}
+- (void)layoutContentView {
+    %orig;
+    WCRBindOverrideToVM(WCRSafeCall0(self, NSSelectorFromString(@"viewModel")), self);
+    static int probeB = 0;
+    if (probeB < 2) { probeB++; WCRLog("apply: TMCell layoutContentView hook ALIVE (#%d)", probeB); }
+    WCRApplyTextToCell(self, "TMCell.layoutContentView");
+}
+%end
+
 %hook BaseMessageCellView
 - (void)setViewModel:(id)vm {
     %orig;
-    @try {
-        WCRClownConfig *cfg = [WCRClownConfig shared];
-        if (!cfg.enabled || !cfg.textEnabled) return;
-        // 仅文本消息 Cell：响应 getRichTextView（TextMessageCellView）。图片/语音等类型不动。
-        // 注意：%hook 内 self 的静态类型是被 hook 类的前向声明，直接向它发 respondsToSelector:
-        // 会触发 "receiver type ... is a forward declaration"（-Werror 直接红），必须 (id) 中转。
-        if (![(id)self respondsToSelector:NSSelectorFromString(@"getRichTextView")]) return;
-        id wrap = WCRCellWrap(self, vm);
-        if (!wrap) wrap = WCRSafeCall0(self, NSSelectorFromString(@"getCurrentMessageWrap"));
-        if (!wrap) return;
-        NSString *key = [WCRClownStore.shared messageKeyForWrap:wrap session:nil];
-        NSDictionary *entry = key.length ? [WCRClownStore.shared overridesForKey:key] : nil;
-        NSString *replacement = entry[@"text"];
-        if (!replacement.length) return;
-        id rtv = WCRSafeCall0(self, NSSelectorFromString(@"getRichTextView"));
-        if (!rtv) { WCRLog("apply: richTextView nil key=%@", key); return; }
-        WCRSafeCall1(rtv, NSSelectorFromString(@"setContent:"), replacement);
-        WCRSafeCall0(rtv, NSSelectorFromString(@"forceDisplayInSync"));
-        WCRLog("apply: richText override key=%@ newLen=%lu", key, (unsigned long)replacement.length);
-    } @catch (NSException *e) {
-        WCRLog("apply exception: %@", e);
-    }
+    WCRApplyTextToCell(self, "BaseCell.setViewModel");
 }
 %end
 %end
@@ -599,7 +713,15 @@ static UIViewController *WCRFrontChatVC(void) {
         // 否则 initWithTitle:target:action: 收到 nil target 时点击路由会失效（小丑点了没反应）。
         if (!gWCRTapHandler) gWCRTapHandler = [[WCRClownTapHandler alloc] init];
         WCRLog("entry tapHandler=%@", (gWCRTapHandler ? (id)@"ready" : (id)@"nil"));
-        if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
+        // WCRApply 三层注入只依赖 TextMessageViewModel / TextMessageCellView 真实存在（diag23 已确认）。
+        // 0.4.2 的守卫只看 BaseMessageCellView.setViewModel:，而该方法是 TextMessageCellView 自己重写的，
+        // 守卫通过却 hook 不到文本 Cell ⇒ 旧守卫毫无意义，改为校验真正的目标类并明确打日志。
+        if (objc_getClass("TextMessageViewModel") && objc_getClass("TextMessageCellView")) {
+            %init(WCRApply);
+            WCRLog("apply hooks installed: VM init/contentText + TMCell setViewModel/layoutContentView");
+        } else {
+            WCRLog("apply hooks SKIPPED: TextMessageViewModel/CellView missing");
+        }
         // 长按菜单：WCRMenuCtx(UIContextMenuConfiguration) 是旧系统兜底，8.0.71 实测不走这条（工厂从不触发）；
         // 真正的注入在 WCREntry 组（MMMenuController / filteredMenuItems: / operationMenuItems）。保留 WCRMenuCtx
         // 仅作其他微信版本的兼容，不影响 8.0.71。
