@@ -155,31 +155,45 @@ static UIMenu *WCRMenuAppendClown(UIMenu *origMenu) {
     return [UIMenu menuWithTitle:origMenu.title ?: @"" children:kids];
 }
 
-// 包住微信的 actionProvider：捕获原始 provider（参数传入，不读实例属性，因 iOS16 SDK 不再暴露该属性），
-// 在其返回的 UIMenu.children 上追加「小丑」UIAction。调用时把 UIKit 传入的参数原样转发给微信原始
-// provider（无论 iOS 版本传的是 config 还是 suggestedElements），保证微信原生菜单照常生成，不破坏其行为。
-// 注意：iOS16 的 UIContextMenuActionProvider 签名是 (NSArray<UIMenuElement*>*) -> UIMenu，
-// 旧 SDK 是 (UIContextMenuConfiguration*) -> UIMenu；这里用 id 捕获、用 elements 透传，二进制层均是指针，等价。
-static UIContextMenuConfiguration *WCRWrapClownProvider(id identifier, id previewProvider, id origProvider) {
-    if (!origProvider) return nil;
-    return [UIContextMenuConfiguration configurationWithIdentifier:identifier
-                                                  previewProvider:previewProvider
-                                                   actionProvider:^UIMenu *(NSArray<UIMenuElement *> *elements) {
-        UIMenu *origMenu = nil;
-        if (origProvider) {
-            UIMenu *(^prov)(id) = origProvider;
-            @try { origMenu = prov(elements); } @catch (NSException *e) { WCRLog("ctx provider exc: %@", e); }
-        }
-        return WCRMenuAppendClown(origMenu);
-    }];
+// 包住微信的 actionProvider：把「小丑」UIAction 追加进微信原生 UIMenu。
+// ⚠️ 致命递归修复：早期版本在 factory hook 内又调 [UIContextMenuConfiguration
+// configurationWithIdentifier:...] 新建配置，会**递归进入本 hook** → 长按即栈溢出崩溃；
+// 之前没爆是因为 menuEntryEnabled 被旧版持久化成 0、这段代码是死代码，一旦开入口首次长按就崩。
+// 正确做法：把包好的 provider 直接传给 %orig（原始工厂/原始 init 实现），绝不再次调用被 hook 的构造器。
+// 同时 hook 工厂 + init 两条构造路径（init 是 designated initializer，工厂内部也调 init），最稳；
+// 用 id 捕获 + elements 透传兼容 iOS16 新签名 (NSArray<UIMenuElement*>*) -> UIMenu。
+static UIMenu *WCRInvokeOrigProvider(id origProvider, id elements) {
+    UIMenu *origMenu = nil;
+    if (origProvider) {
+        UIMenu *(^prov)(id) = origProvider;
+        @try { origMenu = prov(elements); } @catch (NSException *e) { WCRLog("ctx provider exc: %@", e); }
+    }
+    return WCRMenuAppendClown(origMenu);
 }
 
 %group WCRMenuCtx
 %hook UIContextMenuConfiguration
 + (UIContextMenuConfiguration *)configurationWithIdentifier:(id)identifier previewProvider:(id)previewProvider actionProvider:(id)actionProvider {
-    if ([WCRClownConfig shared].menuEntryEnabled && actionProvider) {
+    BOOL on = [WCRClownConfig shared].menuEntryEnabled;
+    WCRLog("ctx factory called id=%@ menuEntry=%d ap=%d", identifier, on, actionProvider?1:0);
+    if (on && actionProvider) {
         WCRLog("ctxConfig factory fired id=%@", identifier);
-        return WCRWrapClownProvider(identifier, previewProvider, actionProvider);
+        id wrapped = ^UIMenu *(NSArray<UIMenuElement *> *elements) {
+            return WCRInvokeOrigProvider(actionProvider, elements);
+        };
+        return %orig(identifier, previewProvider, wrapped);
+    }
+    return %orig(identifier, previewProvider, actionProvider);
+}
+- (instancetype)initWithIdentifier:(id)identifier previewProvider:(id)previewProvider actionProvider:(id)actionProvider {
+    BOOL on = [WCRClownConfig shared].menuEntryEnabled;
+    WCRLog("ctx init called id=%@ menuEntry=%d ap=%d", identifier, on, actionProvider?1:0);
+    if (on && actionProvider) {
+        WCRLog("ctxConfig init fired id=%@", identifier);
+        id wrapped = ^UIMenu *(NSArray<UIMenuElement *> *elements) {
+            return WCRInvokeOrigProvider(actionProvider, elements);
+        };
+        return %orig(identifier, previewProvider, wrapped);
     }
     return %orig(identifier, previewProvider, actionProvider);
 }
