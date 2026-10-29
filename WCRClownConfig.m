@@ -17,8 +17,11 @@ static NSString *const kWCRClownDefaults = @"com.zlhkf.wclown";
     if ((self = [super init])) {
         _defaults = [[NSUserDefaults alloc] initWithSuiteName:kWCRClownDefaults];
         [_defaults registerDefaults:@{
-            @"enabled": @NO,
-            @"textEnabled": @NO,
+            // enabled / textEnabled 默认开：小丑的核心就是「编辑本条文字」，默认关会导致
+            // applyOverridesToMessage 直接 early-return（覆盖写了也不生效），用户第一次编辑就「没效果」。
+            // 仍保留设置开关，用户可手动关闭。已在装用户若此前持久化了 NO，编辑器保存时会自动开启（见 wcr_save）。
+            @"enabled": @YES,
+            @"textEnabled": @YES,
             @"imageEnabled": @NO,
             @"messageTimeEnabled": @NO,
             @"messageSortEnabled": @NO,

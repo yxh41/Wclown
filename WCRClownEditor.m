@@ -2,6 +2,7 @@
 #import "WCRClownConfig.h"
 #import "WCRClownStore.h"
 #import "WCRClownRuntime.h"
+#import "WCRClownLog.h"
 #import <objc/runtime.h>
 
 @interface WCRClownEditorViewController ()
@@ -97,8 +98,17 @@
     } else {
         [[WCRClownStore shared] setText:nil quotedText:nil forKey:self.msgKey];
     }
+    // 保证覆盖真正生效：主动编辑即代表用户想要本条显示。若主开关 / 文字开关此前被关（无论是
+    // 默认值还是用户在设置里关过），此处显式打开，否则 applyOverridesToMessage 会 early-return，
+    // 出现「编辑没效果」。开关有 setter 持久化，打开后保持开启，用户仍可在设置里手动关闭。
+    WCRClownConfig *cfg = [WCRClownConfig shared];
+    if (!cfg.enabled) { cfg.enabled = YES; WCRLog("editor auto-enable enabled"); }
+    if (!cfg.textEnabled) { cfg.textEnabled = YES; WCRLog("editor auto-enable textEnabled"); }
     if (self.host) {
         WCRSafeCall0(self.host, NSSelectorFromString(@"wcr_reloadChat"));
+        WCRLog("editor saved key=%@ reloaded host=%@", self.msgKey, NSStringFromClass(object_getClass(self.host)));
+    } else {
+        WCRLog("editor saved key=%@ but host nil (no reload)", self.msgKey);
     }
     [self dismissViewControllerAnimated:YES completion:nil];
 }

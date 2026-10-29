@@ -272,24 +272,38 @@ static void WCRProbeSignatures(void) {
 static WCRClownTapHandler *gWCRTapHandler = nil;
 static NSString *gWCRCurrentKey = nil;
 static id gWCRCurrentWrap = nil;
-// 前向声明：WCRPresenterVC 定义在文件下方（line 335），本 handler 在 line 269 调用，
+// 前向声明：WCRPresenterVC / WCRFrontChatVC 定义在文件下方，本 handler 在上方调用，
 // 必须在此声明否则 -Werror 下报 implicit declaration 直接构建失败。
 static UIViewController *WCRPresenterVC(void);
+static UIViewController *WCRFrontChatVC(void);
 @implementation WCRClownTapHandler
 - (void)wcr_clownMenuItemTapped {
     NSString *key = gWCRCurrentKey;
     id wrap = gWCRCurrentWrap;
     WCRLog("tap handler fired key=%@ wrap=%@", key, wrap ? NSStringFromClass(object_getClass(wrap)) : @"nil");
     if (!key.length) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 长按菜单经独立 MMMenuWindow 弹出，点「小丑」后该菜单会自行收起。必须等它收起后再 present：
+    // 否则编辑器落在主窗口、被处于高 windowLevel 的菜单窗口遮挡，视觉上「出不来」。
+    // 同时必须呈现到真正在前台的聊天页（BaseMsgContentViewController），否则重载会发到 TabBar 根而静默 no-op。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            UIViewController *top = WCRPresenterVC();
+            UIViewController *top = WCRFrontChatVC();
+            if (!top) top = WCRPresenterVC();   // 兜底：非聊天页场景退回原逻辑
             if (!top) { WCRLog("tap handler no top vc"); return; }
+            // 防重入：若本编辑器已呈现则跳过，避免重复 present 抛异常
+            UIViewController *presented = top.presentedViewController;
+            if (presented && [presented isKindOfClass:[UINavigationController class]] &&
+                [[(UINavigationController *)presented topViewController] isKindOfClass:[WCRClownEditorViewController class]]) {
+                WCRLog("tap handler editor already shown, skip");
+                return;
+            }
             WCRClownEditorViewController *ed =
                 [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:ed];
             nav.modalPresentationStyle = UIModalPresentationPageSheet;
-            [top presentViewController:nav animated:YES completion:^{ WCRLog("editor presented key=%@", key); }];
+            [top presentViewController:nav animated:YES completion:^{
+                WCRLog("editor presented key=%@ on=%@", key, NSStringFromClass(object_getClass(top)));
+            }];
         } @catch (NSException *e) { WCRLog("present editor exc: %@", e); }
     });
 }
@@ -369,6 +383,39 @@ static UIViewController *WCRPresenterVC(void) {
     UIViewController *vc = keyWin.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     return vc;
+}
+
+// 取当前前台最上层、可见的 BaseMsgContentViewController（聊天页）。长按菜单经由独立 MMMenuWindow
+// 弹出，不属于 keyWindow 的 presented 链，所以 WCRPresenterVC 往往只走到 TabBar 根，导致编辑器被
+// present 到错误的 VC（重载失效、且可能被菜单窗口遮挡显得「出不来」）。这里直接遍历可见 window 的
+// 视图控制器树（nav / tab / presented），找到最前方的聊天页，作为编辑器的 presentee 与重载目标。
+static UIViewController *WCRFrontChatVC(void) {
+    UIViewController *best = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in ws.windows) {
+            UIViewController *vc = w.rootViewController;
+            while (vc) {
+                if ([vc isKindOfClass:NSClassFromString(@"BaseMsgContentViewController")]) { best = vc; break; }
+                UIViewController *next = vc.presentedViewController;
+                if (!next && [vc respondsToSelector:@selector(topViewController)]) {
+                    UIViewController *tn = [(UINavigationController *)vc topViewController];
+                    if (tn) next = tn;
+                }
+                if (!next && [vc respondsToSelector:@selector(selectedViewController)]) {
+                    UIViewController *sv = [(UITabBarController *)vc selectedViewController];
+                    if (sv) next = sv;
+                }
+                if (!next) break;
+                vc = next;
+            }
+            if (best) break;
+        }
+        if (best) break;
+    }
+    return best;
 }
 
 %group WCREntry
