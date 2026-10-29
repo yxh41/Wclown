@@ -87,33 +87,37 @@ static void WCRLogCompatibility(void) {
 %end
 %end
 
-#pragma mark - 长按消息打开「编辑本条」面板（安全入口：接管 onShowOperationMenu，不注入微信菜单数组）
-%group WCREdit
+#pragma mark - 长按菜单加入「小丑」条目（标准 UIMenuController.menuItems，保留微信原生菜单）
+%group WCRMenu
 %hook BaseMessageCellView
-- (void)onShowOperationMenu {
-    WCRClownConfig *cfg = [WCRClownConfig shared];
-    if (cfg.menuEntryEnabled) {
-        @try {
-            id wrap = WCRCellWrap(self, nil);
-            NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
-            WCRLog("edit menu fired key=%@", key);
-            if (key.length) {
-                UIViewController *top = WCRTopController();
-                if (top) {
-                    WCRClownEditorViewController *ed =
-                        [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
-                    UINavigationController *nav =
-                        [[UINavigationController alloc] initWithRootViewController:ed];
-                    nav.modalPresentationStyle = UIModalPresentationPageSheet;
-                    [top presentViewController:nav animated:YES completion:nil];
-                    return; // 接管长按：不显示微信原生菜单
-                }
-            }
-        } @catch (NSException *e) {
-            WCRLog("edit menu exception: %@", e);
-        }
+- (BOOL)canPerformAction:(SEL)action withSender:(id)sender {
+    if (action == @selector(wcr_clownMenuTapped:) && [WCRClownConfig shared].menuEntryEnabled) {
+        WCRLog("menu canPerform wcr_clownMenuTapped: YES");
+        return YES;
     }
-    %orig;
+    return %orig;
+}
+
+%new
+- (void)wcr_clownMenuTapped:(id)sender {
+    @try {
+        id wrap = WCRCellWrap(self, nil);
+        NSString *key = wrap ? [WCRClownStore.shared messageKeyForWrap:wrap session:nil] : nil;
+        WCRLog("menu tapped key=%@", key);
+        if (key.length) {
+            UIViewController *top = WCRTopController();
+            if (top) {
+                WCRClownEditorViewController *ed =
+                    [[WCRClownEditorViewController alloc] initWithMessageKey:key wrap:wrap host:top];
+                UINavigationController *nav =
+                    [[UINavigationController alloc] initWithRootViewController:ed];
+                nav.modalPresentationStyle = UIModalPresentationPageSheet;
+                [top presentViewController:nav animated:YES completion:nil];
+            }
+        }
+    } @catch (NSException *e) {
+        WCRLog("menu tap exception: %@", e);
+    }
 }
 %end
 %end
@@ -143,7 +147,21 @@ static void WCRLogCompatibility(void) {
         // 悬浮入口：纯 UIKit overlay，不依赖微信任何私有类，也不会往微信数据结构注入对象
         [WCRClownEntry installIfNeeded];
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
-        if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"onShowOperationMenu")) %init(WCREdit);
+        // 注册「小丑」到全局 UIMenuController（标准做法，不碰微信私有菜单数组）
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        {
+            NSMutableArray *items = [NSMutableArray arrayWithArray:[UIMenuController sharedMenuController].menuItems ?: @[]];
+            BOOL has = NO;
+            for (UIMenuItem *it in items) if ([it.title isEqualToString:@"小丑"]) { has = YES; break; }
+            if (!has) {
+                UIMenuItem *item = [[UIMenuItem alloc] initWithTitle:@"小丑" action:@selector(wcr_clownMenuTapped:)];
+                [items addObject:item];
+                [UIMenuController sharedMenuController].menuItems = items;
+            }
+        }
+#pragma clang diagnostic pop
+        if (NSClassFromString(@"BaseMessageCellView")) %init(WCRMenu);
         if (objc_getClass("BaseMsgContentViewController")) %init(WCRReload);
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillTerminateNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
             [[WCRClownStore shared] clearAll];
