@@ -10,6 +10,13 @@
 #import "WCRClownLog.h"
 #import "WCRClownEditor.h"
 
+// 编译期前向声明：微信私有类 MMMenuItem 的真实构造器（已砸壳二进制权威确认，见 diag16）。
+// 运行期经 NSClassFromString 取类，编译期用 NSObject 分类暴露 initWithTitle:target:action:，
+// 否则 -Werror 下报 no known instance method for selector。仅用于消除编译告警，运行期走真实实现。
+@interface NSObject (WCRMMMenuItemInit)
+- (instancetype)initWithTitle:(NSString *)title target:(id)target action:(SEL)action;
+@end
+
 // 非 static 且显式 default visibility：面板要引用它显示实际构建版本，便于核对是否装错包。
 // 注意：下方定义行是本文件唯一的版本注入点（build.yml 会改这一行的版本号），请勿在别处
 // 复制该声明，也不要在本文件其它位置写入同名变量名加等号的格式，以免 sed 注入错位。
@@ -255,6 +262,11 @@ static void WCRProbeSignatures(void) {
 //   - 用 accessibilityLabel=@"wcr.clown" 作为幂等标记（MMMenuItem 无 title 访问器，不能用 valueForKey:title）。
 // 为什么不用 sender.userInfo：MMMenuItem 触发 action 时是否把 item 当参数传入不确定，为避免读取野指针，
 // handler 采用无参方法 + 全局 key，安全优先。
+// 全局状态（必须在 WCRClownTapHandler @implementation 之前声明，否则 -Werror 下报
+// use of undeclared identifier 'gWCRCurrentKey' / 'gWCRCurrentWrap'）：
+static WCRClownTapHandler *gWCRTapHandler = nil;
+static NSString *gWCRCurrentKey = nil;
+static id gWCRCurrentWrap = nil;
 // 前向声明：WCRPresenterVC 定义在文件下方（line 335），本 handler 在 line 269 调用，
 // 必须在此声明否则 -Werror 下报 implicit declaration 直接构建失败。
 static UIViewController *WCRPresenterVC(void);
@@ -280,9 +292,6 @@ static UIViewController *WCRPresenterVC(void);
     });
 }
 @end
-static WCRClownTapHandler *gWCRTapHandler = nil;
-static NSString *gWCRCurrentKey = nil;
-static id gWCRCurrentWrap = nil;
 
 // 构造「小丑」MMMenuItem：实测微信 8.0.71 的长按菜单是 MMMenuController + MMMenuItem 数组，
 // 必须以 MMMenuItem 的 initWithTitle:target:action: 构造可点击项；UIMenuItem 在该数组里不被接受
@@ -298,8 +307,10 @@ static id WCRMakeClownItem(NSArray *existing, NSString *payloadKey) {
             if (item) {
                 if ([item respondsToSelector:@selector(setAccessibilityLabel:)])
                     [item setAccessibilityLabel:@"wcr.clown"];
-                if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)])
-                    [item setUserInfo:payloadKey];
+                if (payloadKey && [item respondsToSelector:@selector(setUserInfo:)]) {
+                    // 走 performSelector 避免向 id 发送未声明 selector 在 -Werror 下报错
+                    (void)[item performSelector:@selector(setUserInfo:) withObject:payloadKey];
+                }
                 return item;
             }
         } @catch (NSException *e) { WCRLog("entry mm item exc: %@", e); }
