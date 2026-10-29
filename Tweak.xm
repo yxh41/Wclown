@@ -262,6 +262,11 @@ static void WCRProbeSignatures(void) {
 //   - 用 accessibilityLabel=@"wcr.clown" 作为幂等标记（MMMenuItem 无 title 访问器，不能用 valueForKey:title）。
 // 为什么不用 sender.userInfo：MMMenuItem 触发 action 时是否把 item 当参数传入不确定，为避免读取野指针，
 // handler 采用无参方法 + 全局 key，安全优先。
+// 前向声明 WCRClownTapHandler 类（必须在引用它的 static 全局之前，否则 -Werror 下报
+// unknown type name 'WCRClownTapHandler'）：
+@interface WCRClownTapHandler : NSObject
+- (void)wcr_clownMenuItemTapped;
+@end
 // 全局状态（必须在 WCRClownTapHandler @implementation 之前声明，否则 -Werror 下报
 // use of undeclared identifier 'gWCRCurrentKey' / 'gWCRCurrentWrap'）：
 static WCRClownTapHandler *gWCRTapHandler = nil;
@@ -270,9 +275,6 @@ static id gWCRCurrentWrap = nil;
 // 前向声明：WCRPresenterVC 定义在文件下方（line 335），本 handler 在 line 269 调用，
 // 必须在此声明否则 -Werror 下报 implicit declaration 直接构建失败。
 static UIViewController *WCRPresenterVC(void);
-@interface WCRClownTapHandler : NSObject
-- (void)wcr_clownMenuItemTapped;
-@end
 @implementation WCRClownTapHandler
 - (void)wcr_clownMenuItemTapped {
     NSString *key = gWCRCurrentKey;
@@ -482,7 +484,7 @@ static UIViewController *WCRPresenterVC(void) {
         // 全局点击 handler：MMMenuItem 以 target/action 机制触发，必须在挂注入 hook 前实例化，
         // 否则 initWithTitle:target:action: 收到 nil target 时点击路由会失效（小丑点了没反应）。
         if (!gWCRTapHandler) gWCRTapHandler = [[WCRClownTapHandler alloc] init];
-        WCRLog("entry tapHandler=%@", gWCRTapHandler ? @"ready" : @"nil");
+        WCRLog("entry tapHandler=%@", (gWCRTapHandler ? (id)@"ready" : (id)@"nil"));
         if (WCRClassAndSelectorAvailable(@"BaseMessageCellView", @"setViewModel:")) %init(WCRApply);
         // 长按菜单：WCRMenuCtx(UIContextMenuConfiguration) 是旧系统兜底，8.0.71 实测不走这条（工厂从不触发）；
         // 真正的注入在 WCREntry 组（MMMenuController / filteredMenuItems: / operationMenuItems）。保留 WCRMenuCtx
