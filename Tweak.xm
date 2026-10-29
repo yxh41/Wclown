@@ -155,18 +155,20 @@ static UIMenu *WCRMenuAppendClown(UIMenu *origMenu) {
     return [UIMenu menuWithTitle:origMenu.title ?: @"" children:kids];
 }
 
-// 包住微信返回的 UIContextMenuConfiguration：复用 identifier/previewProvider，替换 actionProvider
-// 使其返回的 UIMenu 带上「小丑」UIAction。origProvider 可能在异常环境调用，做保护。
-static UIContextMenuConfiguration *WCRWrapClownConfig(UIContextMenuConfiguration *orig) {
-    if (!orig) return nil;
-    id origProvider = orig.actionProvider;
-    return [UIContextMenuConfiguration configurationWithIdentifier:orig.identifier
-                                                  previewProvider:orig.previewProvider
-                                                   actionProvider:^UIMenu *(UIContextMenuConfiguration *cfg) {
+// 包住微信的 actionProvider：捕获原始 provider（参数传入，不读实例属性，因 iOS16 SDK 不再暴露该属性），
+// 在其返回的 UIMenu.children 上追加「小丑」UIAction。调用时把 UIKit 传入的参数原样转发给微信原始
+// provider（无论 iOS 版本传的是 config 还是 suggestedElements），保证微信原生菜单照常生成，不破坏其行为。
+// 注意：iOS16 的 UIContextMenuActionProvider 签名是 (NSArray<UIMenuElement*>*) -> UIMenu，
+// 旧 SDK 是 (UIContextMenuConfiguration*) -> UIMenu；这里用 id 捕获、用 elements 透传，二进制层均是指针，等价。
+static UIContextMenuConfiguration *WCRWrapClownProvider(id identifier, id previewProvider, id origProvider) {
+    if (!origProvider) return nil;
+    return [UIContextMenuConfiguration configurationWithIdentifier:identifier
+                                                  previewProvider:previewProvider
+                                                   actionProvider:^UIMenu *(NSArray<UIMenuElement *> *elements) {
         UIMenu *origMenu = nil;
         if (origProvider) {
-            UIMenu *(^prov)(UIContextMenuConfiguration *) = origProvider;
-            @try { origMenu = prov(cfg); } @catch (NSException *e) { WCRLog("ctx provider exc: %@", e); }
+            UIMenu *(^prov)(id) = origProvider;
+            @try { origMenu = prov(elements); } @catch (NSException *e) { WCRLog("ctx provider exc: %@", e); }
         }
         return WCRMenuAppendClown(origMenu);
     }];
@@ -175,12 +177,11 @@ static UIContextMenuConfiguration *WCRWrapClownConfig(UIContextMenuConfiguration
 %group WCRMenuCtx
 %hook UIContextMenuConfiguration
 + (UIContextMenuConfiguration *)configurationWithIdentifier:(id)identifier previewProvider:(id)previewProvider actionProvider:(id)actionProvider {
-    UIContextMenuConfiguration *orig = %orig(identifier, previewProvider, actionProvider);
-    if ([WCRClownConfig shared].menuEntryEnabled && orig && orig.actionProvider) {
+    if ([WCRClownConfig shared].menuEntryEnabled && actionProvider) {
         WCRLog("ctxConfig factory fired id=%@", identifier);
-        return WCRWrapClownConfig(orig);
+        return WCRWrapClownProvider(identifier, previewProvider, actionProvider);
     }
-    return orig;
+    return %orig(identifier, previewProvider, actionProvider);
 }
 %end
 %end
