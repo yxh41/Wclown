@@ -75,6 +75,25 @@
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
+			<key>label</key><string>入口</string>
+			<key>footerText</key><string>长按菜单入口：在微信长按消息的原生菜单里追加「小丑」。悬浮入口：屏幕角落常驻「丑」按钮，作为备用入口。两者默认开启；老版本若关过会残留为关，请用下方「恢复默认设置」清除。</string>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSToggleSwitchCell</string>
+			<key>label</key><string>长按菜单入口</string>
+			<key>id</key><string>menuEntryEnabled</string>
+			<key>key</key><string>menuEntryEnabled</string>
+			<key>default</key><true/>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSToggleSwitchCell</string>
+			<key>label</key><string>悬浮入口</string>
+			<key>id</key><string>floatingEntryEnabled</string>
+			<key>key</key><string>floatingEntryEnabled</string>
+			<key>default</key><true/>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>开发</string>
 			<key>footerText</key><string>诊断 Hook 开启后，下次启动微信会在日志打印候选类/selector 存在性（idevicesyslog 可见）。</string>
 		</dict>
@@ -84,6 +103,12 @@
 			<key>id</key><string>diagnosticHooksEnabled</string>
 			<key>key</key><string>diagnosticHooksEnabled</string>
 			<key>default</key><false/>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSButtonCell</string>
+			<key>label</key><string>恢复默认设置</string>
+			<key>action</key><string>resetSettings</string>
+			<key>confirm</key><string>确定恢复所有开关为默认？长按菜单入口与悬浮入口会回到开启，其余覆盖类回到关闭。仅清空本机设置，不影响聊天记录。</string>
 		</dict>
 	</array>
 </dict>
